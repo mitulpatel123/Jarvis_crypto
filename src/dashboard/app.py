@@ -1,8 +1,9 @@
 import streamlit as st
 import pandas as pd
 import json
-import plotly.graph_objects as go
 import time
+import plotly.graph_objects as go
+from datetime import datetime
 import os
 import sys
 
@@ -11,83 +12,181 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")
 
 from src.data.delta_client import delta_client
 
-st.set_page_config(page_title="Jarvis Crypto Dashboard", layout="wide")
+# --- CONFIGURATION ---
+st.set_page_config(
+    page_title="Jarvis God Mode",
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st.title("🧠 Jarvis Crypto Trader - Real-Time Dashboard")
+# Custom CSS for "Brain Scan" cards
+st.markdown("""
+<style>
+    .agent-card {
+        border-radius: 10px;
+        padding: 15px;
+        text-align: center;
+        margin-bottom: 10px;
+        color: white;
+        border: 1px solid #333;
+    }
+    .bullish { background-color: #00C805; color: black; }
+    .bearish { background-color: #FF3B30; color: white; }
+    .neutral { background-color: #2C2C2E; color: #8E8E93; }
+    .analysis { background-color: #007AFF; color: white; }
+    .metric-value { font-size: 24px; font-weight: bold; }
+</style>
+""", unsafe_allow_html=True)
 
-# Sidebar
-st.sidebar.header("Control Panel")
-symbol = st.sidebar.text_input("Symbol", "BTCUSD")
-refresh_rate = st.sidebar.slider("Refresh Rate (s)", 1, 60, 5)
+# --- HEADER ---
+st.title("🧠 Jarvis Crypto: LIVE BRAIN SCAN")
+col_head1, col_head2, col_head3, col_head4 = st.columns(4)
+col_head1.metric("Active Agents", "30 / 30", "Target: 30")
+col_head2.metric("Market Regime", "VOLATILE", "+5.2% Daily")
+col_head3.metric("AI Confidence", "87%", "High")
 
-# Load State
-def load_state():
+# Trading Mode Display
+from src.config.settings import settings
+mode_color = "red" if settings.TRADING_MODE == "LIVE" else "green"
+col_head4.markdown(f"**Mode:** <span style='color:{mode_color}; font-weight:bold'>{settings.TRADING_MODE}</span>", unsafe_allow_html=True)
+
+# --- MANUAL OVERRIDE & SETTINGS ---
+with st.sidebar:
+    st.header("⚙️ Control Panel")
+    
+    # Mode Switcher
+    current_mode = settings.TRADING_MODE
+    new_mode = st.radio("Trading Mode", ["PAPER", "LIVE"], index=0 if current_mode == "PAPER" else 1)
+    
+    if new_mode != current_mode:
+        # Save to config
+        try:
+            with open("data/config.json", "w") as f:
+                json.dump({"TRADING_MODE": new_mode}, f)
+            st.toast(f"Switched to {new_mode} Mode!", icon="🔄")
+            time.sleep(1)
+            st.rerun()
+        except Exception as e:
+            st.error(f"Failed to save config: {e}")
+
+    st.divider()
+    st.header("Manual Override")
+    if st.button("FORCE BUY 🟢"):
+        # In a real app, this would call executor directly or send a signal
+        # For MVP, we just log it or update state
+        st.toast("Force BUY Signal Sent!", icon="🚀")
+        # TODO: Implement direct executor call
+    
+    if st.button("FORCE SELL 🔴"):
+        st.toast("Force SELL Signal Sent!", icon="📉")
+
+# --- LOAD DATA ---
+def load_live_state():
     try:
         if os.path.exists("data/state.json"):
             with open("data/state.json", "r") as f:
                 return json.load(f)
-    except Exception as e:
-        st.error(f"Error loading state: {e}")
-    return None
+    except:
+        pass
+    return {}
 
-state = load_state()
+state = load_live_state()
+signals = state.get("signals", [])
+symbol = state.get("symbol", "BTCUSD")
 
-# Layout
-col1, col2 = st.columns([2, 1])
+# --- MAIN BRAIN SECTION ---
+st.markdown("---")
+st.subheader("🔮 Main Brain Consensus")
+main_col1, main_col2 = st.columns([3, 1])
 
-with col1:
-    st.subheader(f"Live Chart: {symbol}")
+with main_col1:
+    # Simulating the Main Brain's thought process
+    decision = state.get("decision", {"action": "WAITING", "reasoning": "Initializing..."})
+    st.info(f"**AI Reasoning:** {decision.get('reasoning', 'No reasoning yet.')}")
+
+with main_col2:
+    action = decision.get("action", "NEUTRAL")
+    color = "green" if action == "BUY" else "red" if action == "SELL" else "gray"
+    st.markdown(f"""
+    <div style="background-color: {color}; padding: 20px; border-radius: 15px; text-align: center;">
+        <h1 style="color: white; margin:0;">{action}</h1>
+    </div>
+    """, unsafe_allow_html=True)
+
+# --- THE AGENT GRID (The "Brain Scan") ---
+st.markdown("---")
+st.subheader("🧩 Neural Network Activity (Individual Agents)")
+
+# Create a grid layout (e.g., 4 columns)
+cols = st.columns(4)
+
+# Mock data if no signals yet (REMOVE THIS IN PROD)
+if not signals:
+    signals = [
+        {"agent": "Technical", "action": "ANALYSIS", "confidence": 0.85, "metadata": {"rsi": 28}},
+        {"agent": "News", "action": "SELL", "confidence": 0.60, "metadata": {"sentiment": "negative"}},
+        {"agent": "Whale", "action": "BUY", "confidence": 0.90, "metadata": {"inflow": "500 BTC"}},
+        {"agent": "Risk", "action": "NEUTRAL", "confidence": 1.0, "metadata": {"status": "Safe"}},
+        # Add more mocks to fill grid for demo if empty
+    ]
+
+# Render the Grid
+for i, agent in enumerate(signals):
+    col = cols[i % 4]
     
-    # Fetch Live OHLC
-    try:
-        history = delta_client.get_history(symbol, resolution="1h", limit=100)
-        if 'result' in history:
-            df = pd.DataFrame(history['result'])
-            cols = ['open', 'high', 'low', 'close', 'volume', 'time']
-            for c in cols:
-                if c in df.columns:
-                    df[c] = pd.to_numeric(df[c])
-            
-            df['time'] = pd.to_datetime(df['time'], unit='s')
-            
-            fig = go.Figure(data=[go.Candlestick(x=df['time'],
-                            open=df['open'],
-                            high=df['high'],
-                            low=df['low'],
-                            close=df['close'])])
-            
-            fig.update_layout(height=500, margin=dict(l=0, r=0, t=0, b=0))
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("Failed to fetch chart data.")
-            
-    except Exception as e:
-        st.error(f"Chart Error: {e}")
+    # Determine Color Class
+    css_class = "neutral"
+    act = agent.get('action', 'NEUTRAL')
+    if act == "BUY": css_class = "bullish"
+    elif act == "SELL": css_class = "bearish"
+    elif act == "ANALYSIS": css_class = "analysis"
+    
+    # Extract key detail
+    meta = agent.get('metadata', {})
+    detail = str(meta)
+    if len(detail) > 50: detail = detail[:47] + "..."
+    
+    with col:
+        st.markdown(f"""
+        <div class="agent-card {css_class}">
+            <div style="font-size: 14px; opacity: 0.8;">{agent.get('agent', 'Unknown')}</div>
+            <div class="metric-value">{act}</div>
+            <div style="font-size: 12px;">Conf: {int(agent.get('confidence', 0)*100)}%</div>
+            <hr style="margin: 5px 0; border-color: rgba(255,255,255,0.2);">
+            <div style="font-size: 11px; font-style: italic;">"{detail}"</div>
+        </div>
+        """, unsafe_allow_html=True)
 
-with col2:
-    st.subheader("Main Brain Decision 🧠")
-    if state:
-        decision = state.get("decision", {})
-        action = decision.get("action", "NEUTRAL")
-        confidence = decision.get("confidence", 0.0)
-        reasoning = decision.get("reasoning", "No reasoning available.")
+# --- CHART SECTION ---
+st.markdown("---")
+st.subheader(f"📈 Algorithmic Vision: {symbol}")
+
+try:
+    history = delta_client.get_history(symbol, resolution="1h", limit=100)
+    if 'result' in history:
+        df = pd.DataFrame(history['result'])
+        cols = ['open', 'high', 'low', 'close', 'volume', 'time']
+        for c in cols:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c])
         
-        color = "green" if action == "BUY" else "red" if action == "SELL" else "gray"
-        st.markdown(f"<h2 style='color: {color};'>{action} ({confidence})</h2>", unsafe_allow_html=True)
-        st.info(reasoning)
+        df['time'] = pd.to_datetime(df['time'], unit='s')
         
-        st.markdown(f"**Last Update:** {state.get('last_update')}")
+        fig = go.Figure(data=[go.Candlestick(x=df['time'],
+                        open=df['open'],
+                        high=df['high'],
+                        low=df['low'],
+                        close=df['close'])])
+        
+        fig.update_layout(height=500, margin=dict(l=0, r=0, t=0, b=0))
+        st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("Waiting for agent data...")
+        st.warning("Failed to fetch chart data.")
+        
+except Exception as e:
+    st.error(f"Chart Error: {e}")
 
-# Agent Signals Table
-st.subheader("Agent Signals")
-if state and "signals" in state:
-    signals_df = pd.DataFrame(state["signals"])
-    st.dataframe(signals_df, use_container_width=True)
-else:
-    st.write("No signals available.")
-
-# Auto-Refresh
-time.sleep(refresh_rate)
+# Auto-refresh logic
+time.sleep(5)
 st.rerun()

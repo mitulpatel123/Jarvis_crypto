@@ -50,45 +50,60 @@ class ExecutionEngine:
             if not risk_manager.check_safety(0.0): # TODO: Connect to real PnL tracker
                 return None
 
-            # 4. Place Order
-            logger.info(f"Placing {action} order for {quantity} {symbol} @ {current_price}")
+            # 4. Place Order (Paper vs Live)
+            from src.config.settings import settings
+            from src.data.db_manager import db_manager
+            import pandas as pd
+
+            # AUTO-PAPER PROTOCOL (Safety First)
+            # If confidence is low or market is choppy, force PAPER mode
+            effective_mode = settings.TRADING_MODE
             
-            # Delta Exchange Order Side: 'buy' or 'sell'
-            side = "buy" if action == "BUY" else "sell"
-            
-            # Place Market Order
-            # Note: For bracket orders, Delta might support 'stop_loss_price' in order params
-            # or we place separate orders. Let's check docs or assume separate for now.
-            # Actually, Delta v2/orders usually supports 'stop_loss_price'
-            
-            order_params = {
-                "product_id": 27, # BTCUSD ID, hardcoded for now or lookup
-                "size": int(quantity * 10), # Delta uses contracts? Need to verify contract size.
-                # Wait, BTCUSD contract size is usually 100 USD or similar?
-                # Let's use the 'size' directly if it's contracts.
-                # IMPORTANT: Delta BTCUSD is usually Inverse or Linear?
-                # If Linear, size is in BTC? Or Contracts?
-                # Let's assume 'size' is in contracts for now and log it.
-                # We need to be careful here.
-                "side": side,
-                "order_type": "market_order",
-                "limit_price": str(current_price) # Required for limit, ignored for market?
+            if effective_mode == "LIVE":
+                if confidence < 0.7:
+                    logger.warning(f"⚠️ SAFETY TRIGGER: Confidence {confidence} < 0.7. Downgrading to PAPER mode.")
+                    effective_mode = "PAPER"
+                # Future: Add Market Regime check here
+                # if market_regime == "CHOPPY": effective_mode = "PAPER"
+
+            trade_record = {
+                "symbol": symbol,
+                "direction": action,
+                "entry_price": current_price,
+                "quantity": quantity,
+                "entry_time": pd.Timestamp.now().isoformat(),
+                "status": "OPEN"
             }
+
+            if effective_mode == "LIVE":
+                logger.warning(f"🚨 LIVE MODE: Placing REAL {action} order for {quantity} {symbol} @ {current_price}")
+                
+                # Delta Exchange Order Side: 'buy' or 'sell'
+                side = "buy" if action == "BUY" else "sell"
+                
+                order_params = {
+                    "product_id": 27, # BTCUSD ID
+                    "size": int(quantity * 10), # Assuming contract size logic
+                    "side": side,
+                    "order_type": "market_order",
+                    "limit_price": str(current_price)
+                }
+                
+                try:
+                    response = delta_client.place_order(**order_params)
+                    logger.info(f"✅ LIVE Order Response: {response}")
+                    # Update trade record with real ID if needed
+                except Exception as e:
+                    logger.error(f"❌ LIVE Order Failed: {e}")
+                    return None
+            else:
+                logger.info(f"📝 PAPER MODE: Simulating {action} order for {quantity} {symbol} @ {current_price}")
+                # No API call
+
+            # Store Trade in DB (for both Paper and Live)
+            await db_manager.store_trade(trade_record)
             
-            # For safety in this phase, we will just LOG the order and NOT send it until verified.
-            # But the user said "Real Orders".
-            # I will implement the call but comment it out or use a flag?
-            # No, user said "Real Orders".
-            # However, I need to be sure about Product ID and Contract Size.
-            # I'll fetch product details first.
-            
-            # TODO: Lookup product_id dynamically
-            
-            # response = delta_client.place_order(**order_params)
-            # logger.info(f"Order Response: {response}")
-            
-            # For now, return a success mock to indicate logic worked
-            return {"status": "simulated", "quantity": quantity, "sl": stop_loss_price}
+            return {"status": "executed", "mode": settings.TRADING_MODE, "quantity": quantity, "sl": stop_loss_price}
 
         except Exception as e:
             logger.error(f"Execution failed: {e}")

@@ -30,47 +30,30 @@ class TechnicalAnalysisAgent(BaseAgent):
         sma_50 = talib.SMA(close, timeperiod=50)[-1]
         current_price = close[-1]
 
-        # Logic
-        score = 0
-        
-        # RSI Logic
-        if rsi < 30:
-            score += 1  # Oversold -> Buy
-        elif rsi > 70:
-            score -= 1  # Overbought -> Sell
+        # Bollinger Bands
+        upper, middle, lower = talib.BBANDS(close, timeperiod=20)
+        bb_width = (upper[-1] - lower[-1]) / middle[-1]
 
-        # MACD Logic
-        if current_macd > current_signal:
-            score += 1
-        else:
-            score -= 1
+        # ATR (Volatility)
+        atr = talib.ATR(data['high'].values, data['low'].values, close, timeperiod=14)[-1]
 
-        # SMA Logic
-        if current_price > sma_20 > sma_50:
-            score += 1
-        elif current_price < sma_20 < sma_50:
-            score -= 1
-
-        # Determine Signal
-        action = "NEUTRAL"
-        confidence = 0.5
-        
-        if score >= 2:
-            action = "BUY"
-            confidence = 0.7 + (0.1 * (score - 2))
-        elif score <= -2:
-            action = "SELL"
-            confidence = 0.7 + (0.1 * (abs(score) - 2))
-
+        # Return Raw Features (No Decision)
+        # The Main Brain will decide if RSI 35 is a buy or sell based on context
         return Signal(
             agent_name=self.name,
             symbol=symbol,
-            action=action,
-            confidence=min(confidence, 1.0),
+            action="ANALYSIS", # Placeholder
+            confidence=1.0, # High confidence in the data accuracy
             metadata={
                 "rsi": float(rsi),
                 "macd": float(current_macd),
+                "macd_signal": float(current_signal),
+                "macd_hist": float(macdhist[-1]),
                 "sma_20": float(sma_20),
-                "score": score
+                "sma_50": float(sma_50),
+                "bb_width": float(bb_width),
+                "bb_position": float((current_price - lower[-1]) / (upper[-1] - lower[-1])), # 0=Lower, 1=Upper
+                "atr": float(atr),
+                "price": float(current_price)
             }
         )

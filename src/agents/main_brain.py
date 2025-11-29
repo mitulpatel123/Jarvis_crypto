@@ -41,15 +41,19 @@ class MainBrain(BaseAgent):
             
             Rules:
             1. Analyze the consensus among agents.
-            2. Weigh 'NewsSentimentAgent' and 'TrendFollowingAgent' higher than others.
-            3. If signals are conflicting (e.g., Trend says BUY but News says BEARISH), prefer NEUTRAL or reduce confidence.
-            4. Return your decision as a JSON object with keys: 'action', 'confidence', 'reasoning'.
+            2. **CRITICAL**: Some agents (like TechnicalAnalysisAgent) return action "ANALYSIS". For these, you MUST look at the 'metadata' (e.g., RSI, MACD values) and interpret them yourself.
+               - RSI < 30 is generally Bullish (Oversold).
+               - RSI > 70 is generally Bearish (Overbought).
+               - MACD > Signal is Bullish.
+            3. Weigh 'NewsSentimentAgent' and 'TrendFollowingAgent' higher than others.
+            4. If signals are conflicting (e.g., Trend says BUY but News says BEARISH), prefer NEUTRAL or reduce confidence.
+            5. Return your decision as a JSON object with keys: 'action', 'confidence', 'reasoning'.
             
             Example Output:
             {{
                 "action": "BUY",
                 "confidence": 0.85,
-                "reasoning": "Strong buy signals from Trend and Volume agents, supported by Bullish news sentiment."
+                "reasoning": "Technical indicators show RSI oversold (28) and MACD crossover. News is Bullish. Strong conviction."
             }}
             """
             
