@@ -1,0 +1,11 @@
+requests
+websockets
+pandas
+numpy
+ta-lib
+asyncpg
+python-dotenv
+pydantic
+pytest
+pytest-asyncio
+groq
