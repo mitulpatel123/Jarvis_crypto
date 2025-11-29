@@ -9,3 +9,5 @@ pydantic
 pytest
 pytest-asyncio
 groq
+asyncpg
+pgvector

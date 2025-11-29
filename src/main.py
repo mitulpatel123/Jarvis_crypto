@@ -2,7 +2,11 @@ import asyncio
 import logging
 import sys
 import pandas as pd
+import pkgutil
+import importlib
+import os
 from typing import List
+from datetime import datetime, timezone
 
 # Configure logging
 logging.basicConfig(
@@ -13,153 +17,185 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 from src.data.delta_client import delta_client
-from src.data.groq_client import groq_client
 from src.agents.base_agent import Signal
-from src.agents.technical_agent import TechnicalAnalysisAgent
-from src.agents.trend_agent import TrendFollowingAgent
-from src.agents.volatility_agent import VolatilityAgent
-from src.agents.volume_agent import VolumeAnalysisAgent
-from src.agents.news_agent import NewsSentimentAgent
-from src.agents.pattern_agent import PatternRecognitionAgent
-from src.agents.momentum_agent import MomentumAgent
 from src.agents.main_brain import MainBrain
 from src.execution.executor import executor
+from src.learning.judge import TheJudge
+from src.data.db_manager import db_manager
 
-class JarvisTrader:
+class JarvisScanner:
     def __init__(self):
-        self.symbol = "BTCUSD"
         self.running = False
-        
-        # Initialize Agents
-        self.agents = [
-            TechnicalAnalysisAgent(),
-            TrendFollowingAgent(),
-            VolatilityAgent(),
-            VolumeAnalysisAgent(),
-            NewsSentimentAgent(),
-            PatternRecognitionAgent(),
-            MomentumAgent()
-        ]
         self.main_brain = MainBrain()
-
-    async def run_cycle(self):
-        """
-        Execute one full trading cycle.
-        """
-        logger.info(f"--- Starting Trading Cycle for {self.symbol} ---")
+        self.judge = TheJudge()
+        self.agents = self.load_all_agents()
         
-        try:
-            # 1. Fetch Data
-            # Fetch OHLC for technical agents
-            history = delta_client.get_history(self.symbol, resolution="1h", limit=50)
-            if 'result' not in history:
-                logger.error("Failed to fetch OHLC data.")
-                return
-            
-            candles = history['result']
-            df = pd.DataFrame(candles)
-            cols = ['open', 'high', 'low', 'close', 'volume']
-            for c in cols:
-                df[c] = pd.to_numeric(df[c])
-            
-            current_price = df['close'].iloc[-1]
-            
-            # Calculate ATR for Risk Manager (using Volatility Agent logic or direct TA-Lib)
-            # We can extract it from Volatility Agent signal metadata if available, 
-            # or just calculate it here for safety.
-            # For now, let's rely on Volatility Agent to pass it in metadata.
+        # SCAN CONFIGURATION
+        self.target_markets = ["futures", "options"] # Can add "spot"
+        self.min_volume_24h = 100000 # Ignore dead coins
+        self.batch_size = 5 # Process 5 symbols at a time to respect rate limits
 
-            # 2. Run Agents (Parallel)
-            logger.info("Running Agents...")
-            agent_tasks = []
-            for agent in self.agents:
-                # Some agents need DF, some (News) need just symbol
-                # We'll pass DF to all, BaseAgent handles it? 
-                # NewsAgent signature is (symbol, data=None).
-                # Technical agents expect data.
-                agent_tasks.append(agent.analyze(self.symbol, df))
+    def load_all_agents(self):
+        """
+        Dynamically load ALL agents found in src/agents folder.
+        No more manual list!
+        """
+        agents = []
+        package_path = "src/agents"
+        
+        # Iterate over all files in src/agents
+        for _, name, _ in pkgutil.iter_modules([package_path]):
+            if name == "base_agent" or name == "main_brain": continue
             
+            try:
+                # Import the module
+                module = importlib.import_module(f"src.agents.{name}")
+                # Find the class that inherits from BaseAgent
+                for attribute_name in dir(module):
+                    attribute = getattr(module, attribute_name)
+                    if isinstance(attribute, type) and attribute_name.endswith("Agent") and attribute_name != "BaseAgent":
+                        # Instantiate and add
+                        agents.append(attribute())
+                        logger.info(f"✅ Loaded Agent: {attribute_name}")
+            except Exception as e:
+                logger.error(f"❌ Failed to load {name}: {e}")
+        
+        return agents
+
+    async def get_active_ocean(self):
+        """
+        Fetch ALL tradable assets from Delta Exchange.
+        """
+        logger.info("🌊 Scanning the Ocean for opportunities...")
+        try:
+            response = delta_client.get_products()
+            products = response.get('result', [])
+            
+            opportunities = []
+            for p in products:
+                # Filter Logic
+                if p.get('contract_type') in ["perpetual_futures", "call_options", "put_options"]:
+                     # You might want to filter by volume here if available in product list
+                     # or we filter later after fetching ticker
+                     opportunities.append(p['symbol'])
+            
+            # Fallback if empty (e.g. API error)
+            if not opportunities:
+                logger.warning("Ocean scan returned 0 symbols. Using fallback.")
+                return ["BTCUSD", "ETHUSD"]
+
+            logger.info(f"🌊 Found {len(opportunities)} active symbols in the ocean.")
+            return opportunities
+        except Exception as e:
+            logger.error(f"Ocean Scan Failed: {e}")
+            return ["BTCUSD"] # Fallback
+
+    async def analyze_symbol(self, symbol):
+        """
+        Run the full Brain cycle on ONE symbol.
+        """
+        try:
+            # 1. Fetch OHLC (Data Foundation)
+            history = delta_client.get_history(symbol, resolution="1h", limit=50)
+            if 'result' not in history or not history['result']:
+                return
+
+            df = pd.DataFrame(history['result'])
+            cols = ['open', 'high', 'low', 'close', 'volume']
+            for c in cols: 
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c])
+            
+            if df.empty: return
+
+            current_price = float(df['close'].iloc[-1])
+
+            # 2. Run All Agents (Parallel)
+            # Filter agents that might fail if data is insufficient?
+            # For now run all.
+            agent_tasks = [agent.analyze(symbol, df) for agent in self.agents]
             signals: List[Signal] = await asyncio.gather(*agent_tasks)
-            
-            # Log Signals
-            for s in signals:
-                logger.info(f"Signal: {s.agent_name} -> {s.action} ({s.confidence})")
 
             # 3. Main Brain Decision
-            logger.info("Consulting Main Brain...")
-            final_decision = await self.main_brain.analyze(self.symbol, signals)
-            logger.info(f"🏆 Final Decision: {final_decision.action} ({final_decision.confidence})")
-            logger.info(f"📝 Reasoning: {final_decision.metadata.get('reasoning')}")
+            final_decision = await self.main_brain.analyze(symbol, signals)
 
-            # 4. Execution
-            if final_decision.action in ["BUY", "SELL"]:
-                # Extract ATR for SL calculation
-                # Find VolatilityAgent signal
-                vol_sig = next((s for s in signals if s.agent_name == "VolatilityAgent"), None)
-                atr = vol_sig.metadata.get('atr', 0.0) if vol_sig else 0.0
+            # 4. Filter: Only Act on High Confidence
+            if final_decision.confidence > 0.75 and final_decision.action in ["BUY", "SELL"]:
+                logger.info(f"🚀 TRADE FOUND: {symbol} | {final_decision.action} | Conf: {final_decision.confidence}")
                 
-                # If ATR missing, calculate simple fallback?
-                if atr == 0.0:
-                    # Simple fallback: 1% of price
-                    atr = current_price * 0.01
-                
-                result = await executor.execute_order(
-                    symbol=self.symbol,
+                # Execute
+                await executor.execute_order(
+                    symbol=symbol,
                     action=final_decision.action,
                     confidence=final_decision.confidence,
                     current_price=current_price,
-                    atr=atr
+                    atr=current_price * 0.02 # distinct ATR logic here
                 )
-                
-                if result:
-                    logger.info(f"✅ Trade Executed: {result}")
-                else:
-                    logger.warning("⚠️ Trade Skipped (Risk/Safety)")
-            else:
-                logger.info("No trade action taken.")
-            # 5. Export State for Dashboard
-            state = {
-                "symbol": self.symbol,
-                "price": current_price,
-                "signals": [
-                    {
-                        "agent": s.agent_name,
-                        "action": s.action,
-                        "confidence": s.confidence,
-                        "metadata": s.metadata
-                    } for s in signals
-                ],
-                "decision": {
-                    "action": final_decision.action,
-                    "confidence": final_decision.confidence,
-                    "reasoning": final_decision.metadata.get('reasoning')
-                },
-                "last_update": pd.Timestamp.now().isoformat()
-            }
             
-            import json
-            import os
-            os.makedirs("data", exist_ok=True)
-            with open("data/state.json", "w") as f:
-                json.dump(state, f, indent=2)
+            # 5. Save State (for UI)
+            self.save_state_for_ui(symbol, current_price, signals, final_decision)
+
         except Exception as e:
-            logger.error(f"Cycle failed: {e}")
+            logger.error(f"Error analyzing {symbol}: {e}")
+
+    def save_state_for_ui(self, symbol, price, signals, decision):
+        # Save to a specific file per symbol or a master state DB
+        # For simplicity, we overwrite state.json (UI will flicker between symbols, 
+        # ideally UI should support a dropdown)
+        import json
+        state = {
+            "symbol": symbol,
+            "price": price,
+            "decision": {
+                "action": decision.action,
+                "confidence": decision.confidence,
+                "reasoning": decision.metadata.get("reasoning", "")
+            },
+            "signals": [
+                {
+                    "agent": s.agent_name,
+                    "action": s.action,
+                    "confidence": s.confidence,
+                    "metadata": s.metadata
+                } for s in signals
+            ],
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        try:
+            with open("data/state.json", "w") as f:
+                json.dump(state, f, indent=4)
+        except Exception as e:
+            logger.error(f"Failed to save state: {e}")
 
     async def start(self):
-        """
-        Start the main loop.
-        """
         self.running = True
-        logger.info("Jarvis Trader Started.")
+        logger.info("🚢 Jarvis Ocean Scanner Started.")
+        
+        # Connect DB
+        await db_manager.connect()
+
         while self.running:
-            await self.run_cycle()
+            # 1. Get List of All Symbols
+            ocean_symbols = await self.get_active_ocean()
             
+            # 2. Process in Batches (Parallel)
+            # We use chunks to avoid hitting API rate limits
+            chunk_size = 5
+            for i in range(0, len(ocean_symbols), chunk_size):
+                batch = ocean_symbols[i:i + chunk_size]
+                logger.info(f"Processing batch: {batch}")
+                
+                tasks = [self.analyze_symbol(sym) for sym in batch]
+                await asyncio.gather(*tasks)
+                
+                await asyncio.sleep(1) # Rate limit breathing room
 
-
-            # Sleep for 1 hour (or configurable interval)
-            logger.info("Sleeping for 1 hour...")
-            await asyncio.sleep(3600)
+            # 3. Run The Judge (Self-Learning)
+            await self.judge.review_performance()
+            
+            logger.info("💤 Ocean Scan Complete. Sleeping 5 minutes...")
+            await asyncio.sleep(300)
 
 if __name__ == "__main__":
-    jarvis = JarvisTrader()
-    asyncio.run(jarvis.start())
+    scanner = JarvisScanner()
+    asyncio.run(scanner.start())

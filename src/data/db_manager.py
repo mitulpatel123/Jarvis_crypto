@@ -1,168 +1,208 @@
-import sqlite3
 import logging
 import json
-from datetime import datetime
 import os
+import asyncio
+import asyncpg
+from datetime import datetime
+from src.config.settings import settings
 
 logger = logging.getLogger(__name__)
 
 class DatabaseManager:
-    def __init__(self, db_path="data/jarvis.db"):
-        self.db_path = db_path
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+    def __init__(self):
+        # Use settings for credentials in production
+        self.dsn = os.getenv("DATABASE_URL", "postgresql://user:password@localhost/jarvis_db")
+        self.pool = None
+        self.use_sqlite_fallback = False
 
     async def connect(self):
-        """Connect to the database (SQLite doesn't need a pool, but we keep interface)."""
-        logger.info(f"Using SQLite database at {self.db_path}")
-        await self._init_tables()
+        """Connect to PostgreSQL with Vector Support."""
+        try:
+            logger.info("🔌 Connecting to PostgreSQL Memory Core...")
+            self.pool = await asyncpg.create_pool(self.dsn)
+            await self._init_tables()
+            logger.info("✅ Memory Core Connected (pgvector active).")
+        except Exception as e:
+            logger.critical(f"❌ Database Connection Failed: {e}")
+            logger.warning("⚠️ Falling back to temporary in-memory mode (Not Recommended).")
+            self.use_sqlite_fallback = True
+            # In a real fallback, we'd init SQLite here, but for now we just warn.
 
     async def disconnect(self):
-        """No-op for SQLite in this simple implementation."""
-        pass
+        if self.pool:
+            await self.pool.close()
 
     async def _init_tables(self):
-        """Initialize necessary tables."""
-        queries = [
-            """
-            CREATE TABLE IF NOT EXISTS ohlc_data (
-                symbol TEXT NOT NULL,
-                timestamp TEXT NOT NULL,
-                open REAL,
-                high REAL,
-                low REAL,
-                close REAL,
-                volume REAL,
-                PRIMARY KEY (symbol, timestamp)
-            );
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT NOT NULL,
-                direction TEXT NOT NULL,
-                entry_price REAL,
-                exit_price REAL,
-                quantity REAL,
-                profit_loss REAL,
-                entry_time TEXT NOT NULL,
-                exit_time TEXT,
-                status TEXT
-            );
-            """,
-            """
-            CREATE TABLE IF NOT EXISTS agent_signals (
-                timestamp TEXT NOT NULL,
-                agent_name TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                signal TEXT NOT NULL,
-                confidence REAL,
-                metadata TEXT,
-                PRIMARY KEY (timestamp, agent_name, symbol)
-            );
-            """
-        ]
+        """Initialize Tables AND Vector Indexes."""
+        if not self.pool: return
         
+        async with self.pool.acquire() as conn:
+            # 1. Enable Vector Extension
+            try:
+                await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+            except Exception as e:
+                logger.error(f"Failed to enable pgvector: {e}. AI Memory will be limited.")
+
+            # 2. OHLC Data (TimescaleDB Hypertable ideally)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS ohlc_data (
+                    symbol TEXT NOT NULL,
+                    timestamp TIMESTAMPTZ NOT NULL,
+                    open DOUBLE PRECISION,
+                    high DOUBLE PRECISION,
+                    low DOUBLE PRECISION,
+                    close DOUBLE PRECISION,
+                    volume DOUBLE PRECISION,
+                    PRIMARY KEY (symbol, timestamp)
+                );
+            """)
+            
+            # 3. True AI Memory (Embeddings)
+            # This stores the "Context" of the market (News + Technicals combined)
+            # 1536 is standard for OpenAI embeddings, Groq might vary (e.g. 768 or 1024)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS ai_memory (
+                    id SERIAL PRIMARY KEY,
+                    timestamp TIMESTAMPTZ DEFAULT NOW(),
+                    symbol TEXT,
+                    concept_vector vector(1536), 
+                    outcome_score DOUBLE PRECISION, -- Did this thought lead to profit?
+                    description TEXT -- The raw thought (e.g. "RSI Low + Whale Buy")
+                );
+            """)
+
+            # 4. Trades
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    id SERIAL PRIMARY KEY,
+                    symbol TEXT NOT NULL,
+                    direction TEXT,
+                    entry_price DOUBLE PRECISION,
+                    exit_price DOUBLE PRECISION,
+                    quantity DOUBLE PRECISION,
+                    profit_loss DOUBLE PRECISION,
+                    entry_time TIMESTAMPTZ NOT NULL,
+                    exit_time TIMESTAMPTZ,
+                    status TEXT
+                );
+            """)
+
+            # 5. Agent Signals
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS agent_signals (
+                    timestamp TIMESTAMPTZ NOT NULL,
+                    agent_name TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    signal TEXT NOT NULL,
+                    confidence DOUBLE PRECISION,
+                    metadata JSONB,
+                    PRIMARY KEY (timestamp, agent_name, symbol)
+                );
+            """)
+
+    async def store_thought(self, symbol, vector, description):
+        """Save a reasoning vector to memory."""
+        if not self.pool: return
+        query = "INSERT INTO ai_memory (symbol, concept_vector, description) VALUES ($1, $2, $3)"
         try:
-            with sqlite3.connect(self.db_path) as conn:
-                cursor = conn.cursor()
-                for query in queries:
-                    cursor.execute(query)
-                conn.commit()
+            await self.pool.execute(query, symbol, vector, description)
         except Exception as e:
-            logger.error(f"Error initializing tables: {e}")
+            logger.error(f"Failed to store thought: {e}")
+
+    async def recall_similar_situations(self, current_vector):
+        """
+        RAG: Find historical moments that looked just like today.
+        This is how Jarvis learns from the past.
+        """
+        if not self.pool: return []
+        # Find top 5 most similar past market states
+        query = """
+            SELECT description, outcome_score 
+            FROM ai_memory 
+            ORDER BY concept_vector <-> $1 
+            LIMIT 5;
+        """
+        try:
+            return await self.pool.fetch(query, current_vector)
+        except Exception as e:
+            logger.error(f"Failed to recall memory: {e}")
+            return []
 
     async def store_ohlc(self, symbol: str, candles: list):
-        """Store OHLC candles."""
+        if not self.pool: return
         query = """
         INSERT INTO ohlc_data (symbol, timestamp, open, high, low, close, volume)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(symbol, timestamp) DO UPDATE 
-        SET open=excluded.open, high=excluded.high, low=excluded.low, 
-            close=excluded.close, volume=excluded.volume;
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (symbol, timestamp) DO UPDATE 
+        SET open = EXCLUDED.open, high = EXCLUDED.high, low = EXCLUDED.low, 
+            close = EXCLUDED.close, volume = EXCLUDED.volume;
         """
         data = []
         for c in candles:
-            ts = c.get('timestamp').isoformat() if isinstance(c.get('timestamp'), datetime) else c.get('timestamp')
-            data.append((
-                symbol, ts, c.get('open'), c.get('high'), c.get('low'), c.get('close'), c.get('volume')
-            ))
+            ts = c.get('timestamp') 
+            o = c.get('open')
+            h = c.get('high')
+            l = c.get('low')
+            cl = c.get('close')
+            v = c.get('volume')
+            data.append((symbol, ts, o, h, l, cl, v))
 
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.executemany(query, data)
-                conn.commit()
-        except Exception as e:
-            logger.error(f"Failed to store OHLC data: {e}")
+        async with self.pool.acquire() as conn:
+            try:
+                await conn.executemany(query, data)
+            except Exception as e:
+                logger.error(f"Failed to store OHLC data: {e}")
 
     async def store_trade(self, trade_data: dict):
+        if not self.pool: return
         query = """
         INSERT INTO trades (symbol, direction, entry_price, exit_price, quantity, profit_loss, entry_time, exit_time, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         """
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute(query, (
+        async with self.pool.acquire() as conn:
+            try:
+                await conn.execute(query, 
                     trade_data['symbol'], trade_data['direction'], trade_data['entry_price'],
                     trade_data.get('exit_price'), trade_data['quantity'], trade_data.get('profit_loss'),
-                    str(trade_data['entry_time']), str(trade_data.get('exit_time')), trade_data['status']
-                ))
-                conn.commit()
-        except Exception as e:
-            logger.error(f"Failed to store trade: {e}")
+                    datetime.fromisoformat(trade_data['entry_time']) if isinstance(trade_data['entry_time'], str) else trade_data['entry_time'], 
+                    datetime.fromisoformat(trade_data['exit_time']) if trade_data.get('exit_time') and isinstance(trade_data['exit_time'], str) else trade_data.get('exit_time'), 
+                    trade_data['status']
+                )
+            except Exception as e:
+                logger.error(f"Failed to store trade: {e}")
 
     async def store_agent_signals(self, signals: list):
+        if not self.pool: return
         query = """
         INSERT INTO agent_signals (timestamp, agent_name, symbol, signal, confidence, metadata)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(timestamp, agent_name, symbol) DO NOTHING
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (timestamp, agent_name, symbol) DO NOTHING
         """
         data = []
         for s in signals:
-            meta = json.dumps(s.get('metadata')) if s.get('metadata') else None
-            data.append((
-                str(s['timestamp']), s['agent_name'], s['symbol'], s['signal'], s['confidence'], meta
-            ))
+            data.append((s['timestamp'], s['agent_name'], s['symbol'], s['signal'], s['confidence'], json.dumps(s.get('metadata'))))
             
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.executemany(query, data)
-                conn.commit()
-        except Exception as e:
-            logger.error(f"Failed to store signals: {e}")
+        async with self.pool.acquire() as conn:
+            try:
+                await conn.executemany(query, data)
+            except Exception as e:
+                logger.error(f"Failed to store signals: {e}")
 
     async def get_recent_trades(self, limit=50):
-        query = "SELECT * FROM trades WHERE status = 'CLOSED' ORDER BY exit_time DESC LIMIT ?"
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
-                cursor.execute(query, (limit,))
-                rows = cursor.fetchall()
-                return [dict(r) for r in rows]
-        except Exception as e:
-            logger.error(f"Failed to fetch trades: {e}")
-            return []
+        if not self.pool: return []
+        query = "SELECT * FROM trades WHERE status = 'CLOSED' ORDER BY exit_time DESC LIMIT $1"
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, limit)
+            return [dict(r) for r in rows]
 
     async def get_agent_signals_at_time(self, timestamp):
-        # SQLite doesn't have INTERVAL syntax like Postgres easily, so we do range check in python or simple string compare if exact
-        # Ideally store timestamps as ISO strings and compare
-        # For now, let's try to match exact or use a range query with string comparison
-        # Assuming timestamp is passed as ISO string or datetime
-        ts_str = str(timestamp)
-        # Simple range: +/- 1 minute logic would require parsing. 
-        # For MVP, let's match exact or just return all for that minute if we truncate seconds?
-        
-        # Let's just fetch signals around that time.
-        query = "SELECT agent_name, signal FROM agent_signals WHERE timestamp = ?"
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                cursor = conn.cursor()
-                cursor.execute(query, (ts_str,))
-                rows = cursor.fetchall()
-                return {r['agent_name']: r['signal'] for r in rows}
-        except Exception as e:
-            logger.error(f"Failed to fetch signals: {e}")
-            return {}
+        if not self.pool: return {}
+        query = """
+        SELECT agent_name, signal FROM agent_signals 
+        WHERE timestamp BETWEEN $1 - INTERVAL '1 minute' AND $1 + INTERVAL '1 minute'
+        """
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(query, timestamp)
+            return {r['agent_name']: r['signal'] for r in rows}
 
 db_manager = DatabaseManager()

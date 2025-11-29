@@ -115,4 +115,14 @@ class DeltaClient:
         """Get wallet balances."""
         return self._request('GET', '/v2/wallet/balances', auth=True)
 
+    def get_products(self):
+        """
+        Fetch all available products from Delta Exchange.
+        """
+        try:
+            return self._request('GET', '/v2/products')
+        except Exception as e:
+            logger.error(f"Error fetching products: {e}")
+            return {'result': []}
+
 delta_client = DeltaClient()
