@@ -17,9 +17,10 @@ class MomentumAgent(BaseAgent):
             if data is None or data.empty:
                 return Signal(agent_name=self.name, symbol=symbol, action="NEUTRAL", confidence=0.0)
 
-            high = data['high'].values
-            low = data['low'].values
-            close = data['close'].values
+            # Ensure data is float64 for talib
+            high = data['high'].values.astype(float)
+            low = data['low'].values.astype(float)
+            close = data['close'].values.astype(float)
 
             # Stochastic
             slowk, slowd = talib.STOCH(high, low, close)
