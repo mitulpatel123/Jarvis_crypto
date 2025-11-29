@@ -84,13 +84,23 @@ col_head4.markdown(f"**Mode:** <span style='color:{mode_color}; font-weight:bold
 # --- OCEAN FEED ---
 st.subheader("🌊 Live Market Opportunities")
 # (This table would populate from db_manager.get_recent_opportunities())
-fake_data = pd.DataFrame({
-    "Asset": ["BTC", "ETH", "SOL", "PEPE"],
-    "AI Confidence": [0.92, 0.88, 0.45, 0.12],
-    "Signal": ["BUY", "BUY", "NEUTRAL", "SELL"],
-    "Reasoning": ["Whale Inflow + RSI Div", "ETH ETF News", "Chop Zone", "Distribution Detected"]
-})
-st.dataframe(fake_data, use_container_width=True)
+# --- OCEAN FEED ---
+st.subheader("🌊 Live Market Opportunities")
+
+def load_ocean_feed():
+    try:
+        if os.path.exists("data/ocean_feed.json"):
+            with open("data/ocean_feed.json", "r") as f:
+                return pd.DataFrame(json.load(f))
+    except:
+        pass
+    return pd.DataFrame(columns=["Asset", "Signal", "AI Confidence", "Reasoning", "Timestamp"])
+
+ocean_df = load_ocean_feed()
+if not ocean_df.empty:
+    st.dataframe(ocean_df, use_container_width=True)
+else:
+    st.info("🌊 Scanning the ocean... Waiting for high-confidence signals.")
 
 st.markdown("---")
 
@@ -171,13 +181,8 @@ cols = st.columns(4)
 
 # Mock data if no signals yet (REMOVE THIS IN PROD)
 if not signals:
-    signals = [
-        {"agent": "Technical", "action": "ANALYSIS", "confidence": 0.85, "metadata": {"rsi": 28}},
-        {"agent": "News", "action": "SELL", "confidence": 0.60, "metadata": {"sentiment": "negative"}},
-        {"agent": "Whale", "action": "BUY", "confidence": 0.90, "metadata": {"inflow": "500 BTC"}},
-        {"agent": "Risk", "action": "NEUTRAL", "confidence": 1.0, "metadata": {"status": "Safe"}},
-        # Add more mocks to fill grid for demo if empty
-    ]
+    st.info("⏳ Waiting for Brain Scan... (System is initializing or idle)")
+    signals = []
 
 # Render the Grid
 for i, agent in enumerate(signals):

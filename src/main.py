@@ -134,9 +134,41 @@ class JarvisScanner:
             
             # 5. Save State (for UI)
             self.save_state_for_ui(symbol, current_price, signals, final_decision)
+            
+            # 6. Update Ocean Feed (Shared JSON for UI)
+            # We append high-confidence finds to a list
+            if final_decision.confidence > 0.6:
+                self.update_ocean_feed(symbol, final_decision)
 
         except Exception as e:
             logger.error(f"Error analyzing {symbol}: {e}")
+
+    def update_ocean_feed(self, symbol, decision):
+        """Update the shared JSON file for the UI Ocean Feed."""
+        feed_path = "data/ocean_feed.json"
+        try:
+            feed = []
+            if os.path.exists(feed_path):
+                with open(feed_path, "r") as f:
+                    feed = json.load(f)
+            
+            # Add new entry
+            new_entry = {
+                "Asset": symbol,
+                "Signal": decision.action,
+                "AI Confidence": decision.confidence,
+                "Reasoning": decision.metadata.get("reasoning", "")[:100] + "...",
+                "Timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            
+            # Prepend and keep top 20
+            feed.insert(0, new_entry)
+            feed = feed[:20]
+            
+            with open(feed_path, "w") as f:
+                json.dump(feed, f, indent=4)
+        except Exception as e:
+            logger.error(f"Failed to update ocean feed: {e}")
 
     def save_state_for_ui(self, symbol, price, signals, decision):
         # Save to a specific file per symbol or a master state DB

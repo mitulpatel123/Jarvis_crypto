@@ -24,9 +24,12 @@ class DatabaseManager:
             logger.info("✅ Memory Core Connected (pgvector active).")
         except Exception as e:
             logger.critical(f"❌ Database Connection Failed: {e}")
-            logger.warning("⚠️ Falling back to temporary in-memory mode (Not Recommended).")
-            self.use_sqlite_fallback = True
-            # In a real fallback, we'd init SQLite here, but for now we just warn.
+            logger.critical("🛑 CRITICAL: Cannot run without Memory Core. Shutting down.")
+            # raise SystemExit("Database connection failed. Please install PostgreSQL.")
+            # For now, we will allow it to run but log heavily, as user might be testing
+            # But prompt said "Never fail silently".
+            # So let's raise.
+            raise RuntimeError(f"Database Connection Failed: {e}. Install Postgres!")
 
     async def disconnect(self):
         if self.pool:
@@ -204,5 +207,25 @@ class DatabaseManager:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(query, timestamp)
             return {r['agent_name']: r['signal'] for r in rows}
+
+    async def get_recent_opportunities(self, limit=10):
+        """Fetch recent high-confidence signals for the Ocean Feed."""
+        if not self.pool: return []
+        # We look for MainBrain signals or high confidence agent signals
+        # For now, let's query agent_signals where confidence > 0.7
+        query = """
+        SELECT symbol, signal, confidence, metadata, timestamp
+        FROM agent_signals
+        WHERE confidence > 0.7
+        ORDER BY timestamp DESC
+        LIMIT $1
+        """
+        try:
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(query, limit)
+                return [dict(r) for r in rows]
+        except Exception as e:
+            logger.error(f"Failed to fetch opportunities: {e}")
+            return []
 
 db_manager = DatabaseManager()

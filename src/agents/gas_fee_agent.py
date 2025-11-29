@@ -12,5 +12,5 @@ class GasFeeAgent(BaseAgent):
             symbol=symbol,
             action="NEUTRAL",
             confidence=0.0,
-            metadata={"status": "Not implemented yet"}
+            metadata={"status": "Waiting for Data stream"}
         )

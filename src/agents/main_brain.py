@@ -21,60 +21,70 @@ class MainBrain(BaseAgent):
                 return Signal(agent_name=self.name, symbol=symbol, action="NEUTRAL", confidence=0.0)
 
             # Prepare context for LLM
-            signals_summary = []
-            for s in data:
-                signals_summary.append({
-                    "agent": s.agent_name,
-                    "action": s.action,
-                    "confidence": s.confidence,
-                    "metadata": s.metadata
-                })
+            signal_summary = "\n".join(
+                [f"- {s.agent_name}: {s.action} (Conf: {s.confidence:.2f}) | {s.metadata}" for s in data]
+            )
+
+            # 2. RAG: Recall "The Past" (The Vector DB Connection)
+            # We assume the Technical Agent's metadata contains a 'vector' or we build a pseudo-vector string
+            # For simplicity, we search memory using a text description of the strongest signal
+            # strongest_signal = max(signals, key=lambda s: s.confidence)
+            # query_context = f"{strongest_signal.agent_name} says {strongest_signal.action} with {strongest_signal.metadata}"
             
-            signals_json = json.dumps(signals_summary, indent=2)
-            
+            # RECALL MEMORY (The "Spark Plug")
+            # In a real system, we'd generate an embedding here: vector = get_embedding(signal_summary)
+            # For now, we log the intent.
+            # past_wisdom = await db_manager.recall_similar_situations(vector)
+            # if past_wisdom:
+            #     prompt += f"\n\nHISTORICAL PRECEDENT:\n{past_wisdom}"
+
             prompt = f"""
-            You are the Chief Investment Officer of a crypto trading fund.
-            Your goal is to make a final BUY, SELL, or NEUTRAL decision for {symbol} based on the input signals from your team of specialized agents.
+            You are the Head Trader of a Crypto Hedge Fund.
             
-            Input Signals:
-            {signals_json}
+            CURRENT MARKET DATA (The "Now"):
+            {signal_summary}
             
-            Rules:
-            1. Analyze the consensus among agents.
-            2. **CRITICAL**: Some agents (like TechnicalAnalysisAgent) return action "ANALYSIS". For these, you MUST look at the 'metadata' (e.g., RSI, MACD values) and interpret them yourself.
-               - RSI < 30 is generally Bullish (Oversold).
-               - RSI > 70 is generally Bearish (Overbought).
-               - MACD > Signal is Bullish.
-            3. Weigh 'NewsSentimentAgent' and 'TrendFollowingAgent' higher than others.
-            4. If signals are conflicting (e.g., Trend says BUY but News says BEARISH), prefer NEUTRAL or reduce confidence.
-            5. Return your decision as a JSON object with keys: 'action', 'confidence', 'reasoning'.
+            TASK:
+            Analyze the conflicting signals. 
+            - Technical Analysis provides the raw stats.
+            - Sentiment provides the news.
+            - Whales provide the flow.
             
-            Example Output:
-            {{
-                "action": "BUY",
-                "confidence": 0.85,
-                "reasoning": "Technical indicators show RSI oversold (28) and MACD crossover. News is Bullish. Strong conviction."
-            }}
+            DECISION LOGIC:
+            - If Whales BUY + Tech OVERSOLD -> STRONG BUY
+            - If News FUD + Tech OVERBOUGHT -> STRONG SELL
+            - If signals conflict -> NEUTRAL (Preserve Capital)
+            
+            Return JSON: {{ "action": "BUY/SELL/NEUTRAL", "confidence": 0.0-1.0, "reasoning": "..." }}
             """
-            
-            messages = [
-                {"role": "system", "content": "You are a high-stakes crypto trading AI. Output JSON only."},
-                {"role": "user", "content": prompt}
-            ]
-            
-            response_message = groq_client.query(
-                messages=messages,
-                model="openai/gpt-oss-120b",
-                response_format={"type": "json_object"} # Enforce JSON
+
+            # Call Groq
+            response = groq_client.query(
+                messages=[{"role": "user", "content": prompt}],
+                model="llama3-70b-8192", # Use a smart model
+                temperature=0.1
             )
             
-            content = response_message.content
-            logger.info(f"Main Brain Decision: {content}")
+            # Parse
+            content = response.content.strip()
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0]
             
             decision = json.loads(content)
             
+            # 4. STORE THIS THOUGHT (Save to Memory)
+            # We save the "Scenario" so we can remember it later
+            # (In V2, we generate an embedding here)
+            # Import db_manager here to avoid circular import if needed, or rely on top-level
+            from src.data.db_manager import db_manager
+            await db_manager.store_thought(
+                symbol=symbol, 
+                vector=None, # Placeholder until embedding model is added
+                description=f"Signals: {signal_summary[:200]}... Result: {decision.get('action')}"
+            )
+
             return Signal(
-                agent_name=self.name,
+                agent_name="MainBrain",
                 symbol=symbol,
                 action=decision.get("action", "NEUTRAL").upper(),
                 confidence=float(decision.get("confidence", 0.0)),
@@ -82,5 +92,5 @@ class MainBrain(BaseAgent):
             )
 
         except Exception as e:
-            logger.error(f"Main Brain analysis failed: {e}")
-            return Signal(agent_name=self.name, symbol=symbol, action="NEUTRAL", confidence=0.0)
+            logger.error(f"Brain Lobotomy Error: {e}")
+            return Signal("MainBrain", symbol, "NEUTRAL", 0.0, {"error": str(e)})
