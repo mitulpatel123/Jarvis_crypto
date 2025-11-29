@@ -4,6 +4,8 @@ pandas
 numpy
 ta-lib
 asyncpg
+sentence-transformers
+googlesearch-python
 python-dotenv
 pydantic
 pytest

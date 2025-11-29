@@ -18,6 +18,7 @@ class MomentumAgent(BaseAgent):
                 return Signal(agent_name=self.name, symbol=symbol, action="NEUTRAL", confidence=0.0)
 
             # Ensure data is float64 for talib
+            # Ensure data is float (double) for TA-Lib
             high = data['high'].values.astype(float)
             low = data['low'].values.astype(float)
             close = data['close'].values.astype(float)

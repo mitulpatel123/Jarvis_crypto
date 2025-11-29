@@ -1,10 +1,14 @@
+import sys
+import os
+
+# Add project root to sys.path
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import asyncio
 import logging
-import sys
 import pandas as pd
 import pkgutil
 import importlib
-import os
 import time
 from datetime import datetime, timezone, timedelta
 from typing import List

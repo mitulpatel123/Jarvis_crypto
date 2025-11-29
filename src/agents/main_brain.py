@@ -77,9 +77,22 @@ class MainBrain(BaseAgent):
             # (In V2, we generate an embedding here)
             # Import db_manager here to avoid circular import if needed, or rely on top-level
             from src.data.db_manager import db_manager
+            
+            # Generate Embedding
+            vector = None
+            try:
+                from sentence_transformers import SentenceTransformer
+                # Use a small, fast model
+                model = SentenceTransformer('all-MiniLM-L6-v2')
+                vector = model.encode(signal_summary).tolist()
+            except ImportError:
+                logger.warning("sentence-transformers not installed. Skipping embedding generation.")
+            except Exception as e:
+                logger.error(f"Embedding generation failed: {e}")
+
             await db_manager.store_thought(
                 symbol=symbol, 
-                vector=None, # Placeholder until embedding model is added
+                vector=vector, 
                 description=f"Signals: {signal_summary[:200]}... Result: {decision.get('action')}"
             )
 
@@ -93,4 +106,4 @@ class MainBrain(BaseAgent):
 
         except Exception as e:
             logger.error(f"Brain Lobotomy Error: {e}")
-            return Signal("MainBrain", symbol, "NEUTRAL", 0.0, {"error": str(e)})
+            return Signal(agent_name="MainBrain", symbol=symbol, action="NEUTRAL", confidence=0.0, metadata={"error": str(e)})

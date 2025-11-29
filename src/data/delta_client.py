@@ -61,7 +61,11 @@ class DeltaClient:
 
     def get_ticker(self, symbol):
         """Get current ticker info for a symbol."""
-        return self._request('GET', '/v2/tickers', params={'symbol': symbol})
+        # Returns: { 'symbol': ..., 'mark_price': ..., 'funding_rate': ..., 'open_interest': ... }
+        response = self._request('GET', '/v2/tickers', params={'symbol': symbol})
+        if response and 'result' in response and len(response['result']) > 0:
+            return response['result'][0]
+        return {}
 
     def get_history(self, symbol, resolution, start=None, end=None, limit=1000):
         """

@@ -16,8 +16,8 @@ class RiskManagementAgent(BaseAgent):
             avg_volatility = high_low.rolling(14).mean().iloc[-1]
             
             if avg_volatility > 0.05: # >5% daily move is risky
-                return Signal(self.name, symbol, "NEUTRAL", 1.0, {"risk": "HIGH_VOLATILITY", "advice": "Reduce Position Size"})
+                return Signal(agent_name=self.name, symbol=symbol, action="NEUTRAL", confidence=1.0, metadata={"risk": "HIGH_VOLATILITY", "advice": "Reduce Position Size"})
             
-            return Signal(self.name, symbol, "NEUTRAL", 0.0, {"risk": "NORMAL", "status": "Safe to Trade"})
+            return Signal(agent_name=self.name, symbol=symbol, action="NEUTRAL", confidence=0.0, metadata={"risk": "NORMAL", "status": "Safe to Trade"})
         except Exception as e:
-            return Signal(self.name, symbol, "NEUTRAL", 0.0, {"error": str(e)})
+            return Signal(agent_name=self.name, symbol=symbol, action="NEUTRAL", confidence=0.0, metadata={"error": str(e)})
