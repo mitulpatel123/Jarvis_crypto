@@ -5,16 +5,17 @@ import pandas as pd
 import pkgutil
 import importlib
 import os
+import time
+from datetime import datetime, timezone, timedelta
 from typing import List
-from datetime import datetime, timezone
 
 # Configure logging
 logging.basicConfig(
     stream=sys.stdout, 
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("JarvisCore")
 
 from src.data.delta_client import delta_client
 from src.agents.base_agent import Signal
@@ -22,212 +23,155 @@ from src.agents.main_brain import MainBrain
 from src.execution.executor import executor
 from src.learning.judge import TheJudge
 from src.data.db_manager import db_manager
+from src.config.settings import settings
 
-class JarvisScanner:
+class JarvisEngine:
     def __init__(self):
         self.running = False
         self.main_brain = MainBrain()
         self.judge = TheJudge()
         self.agents = self.load_all_agents()
-        
-        # SCAN CONFIGURATION
-        self.target_markets = ["futures", "options"] # Can add "spot"
-        self.min_volume_24h = 100000 # Ignore dead coins
-        self.batch_size = 5 # Process 5 symbols at a time to respect rate limits
+        self.mode = settings.TRADING_MODE.upper() # BACKTEST, PAPER, LIVE
 
     def load_all_agents(self):
-        """
-        Dynamically load ALL agents found in src/agents folder.
-        No more manual list!
-        """
         agents = []
         package_path = "src/agents"
-        
-        # Iterate over all files in src/agents
         for _, name, _ in pkgutil.iter_modules([package_path]):
-            if name == "base_agent" or name == "main_brain": continue
-            
+            if name in ["base_agent", "main_brain"]: continue
             try:
-                # Import the module
                 module = importlib.import_module(f"src.agents.{name}")
-                # Find the class that inherits from BaseAgent
-                for attribute_name in dir(module):
-                    attribute = getattr(module, attribute_name)
-                    if isinstance(attribute, type) and attribute_name.endswith("Agent") and attribute_name != "BaseAgent":
-                        # Instantiate and add
-                        agents.append(attribute())
-                        logger.info(f"✅ Loaded Agent: {attribute_name}")
+                for attr_name in dir(module):
+                    attr = getattr(module, attr_name)
+                    if isinstance(attr, type) and attr_name.endswith("Agent") and attr_name != "BaseAgent":
+                        agents.append(attr())
+                        logger.info(f"✅ Loaded Agent: {attr_name}")
             except Exception as e:
                 logger.error(f"❌ Failed to load {name}: {e}")
-        
         return agents
 
-    async def get_active_ocean(self):
-        """
-        Fetch ALL tradable assets from Delta Exchange.
-        """
-        logger.info("🌊 Scanning the Ocean for opportunities...")
-        try:
-            response = delta_client.get_products()
-            products = response.get('result', [])
-            
-            opportunities = []
-            for p in products:
-                # Filter Logic
-                if p.get('contract_type') in ["perpetual_futures", "call_options", "put_options"]:
-                     # You might want to filter by volume here if available in product list
-                     # or we filter later after fetching ticker
-                     opportunities.append(p['symbol'])
-            
-            # Fallback if empty (e.g. API error)
-            if not opportunities:
-                logger.warning("Ocean scan returned 0 symbols. Using fallback.")
-                return ["BTCUSD", "ETHUSD"]
+    async def run_backtest(self, symbol="BTCUSD", days=30):
+        """Mode 1: Paper Trade on Historical Data"""
+        logger.info(f"📜 STARTING BACKTEST: {symbol} for last {days} days")
+        
+        # 1. Fetch History
+        end_time = int(time.time())
+        start_time = end_time - (days * 24 * 60 * 60)
+        
+        response = delta_client.get_history(symbol, "1h", start=start_time, end=end_time, limit=2000)
+        if 'result' not in response:
+            logger.error("No historical data found.")
+            return
 
-            logger.info(f"🌊 Found {len(opportunities)} active symbols in the ocean.")
-            return opportunities
-        except Exception as e:
-            logger.error(f"Ocean Scan Failed: {e}")
-            return ["BTCUSD"] # Fallback
+        df = pd.DataFrame(response['result'])
+        cols = ['open', 'high', 'low', 'close', 'volume']
+        for c in cols: df[c] = pd.to_numeric(df[c])
+        df['time'] = pd.to_datetime(df['time'], unit='s')
+        df = df.sort_values('time')
 
-    async def analyze_symbol(self, symbol):
-        """
-        Run the full Brain cycle on ONE symbol.
-        """
-        try:
-            # 1. Fetch OHLC (Data Foundation)
-            history = delta_client.get_history(symbol, resolution="1h", limit=50)
-            if 'result' not in history or not history['result']:
-                return
+        # 2. Simulate Candle by Candle
+        for i in range(50, len(df)):
+            # Window of data the bot "sees"
+            current_window = df.iloc[:i] 
+            current_candle = df.iloc[i]
+            current_price = float(current_candle['close'])
+            timestamp = current_candle['time']
 
-            df = pd.DataFrame(history['result'])
-            cols = ['open', 'high', 'low', 'close', 'volume']
-            for c in cols: 
-                if c in df.columns:
-                    df[c] = pd.to_numeric(df[c])
-            
-            if df.empty: return
+            logger.info(f"⏳ Replaying {timestamp} | Price: {current_price}")
 
-            current_price = float(df['close'].iloc[-1])
+            # Run Agents
+            agent_tasks = [agent.analyze(symbol, current_window) for agent in self.agents]
+            signals = await asyncio.gather(*agent_tasks)
 
-            # 2. Run All Agents (Parallel)
-            # Filter agents that might fail if data is insufficient?
-            # For now run all.
-            agent_tasks = [agent.analyze(symbol, df) for agent in self.agents]
-            signals: List[Signal] = await asyncio.gather(*agent_tasks)
+            # Brain Decision
+            decision = await self.main_brain.analyze(symbol, signals)
 
-            # 3. Main Brain Decision
-            final_decision = await self.main_brain.analyze(symbol, signals)
-
-            # 4. Filter: Only Act on High Confidence
-            if final_decision.confidence > 0.75 and final_decision.action in ["BUY", "SELL"]:
-                logger.info(f"🚀 TRADE FOUND: {symbol} | {final_decision.action} | Conf: {final_decision.confidence}")
-                
-                # Execute
+            # Execute (In Backtest Mode, Executor just logs DB)
+            if decision.confidence > 0.75 and decision.action in ["BUY", "SELL"]:
                 await executor.execute_order(
                     symbol=symbol,
-                    action=final_decision.action,
-                    confidence=final_decision.confidence,
+                    action=decision.action,
+                    confidence=decision.confidence,
                     current_price=current_price,
-                    atr=current_price * 0.02 # distinct ATR logic here
+                    atr=current_price * 0.02,
+                    mode="BACKTEST",
+                    timestamp=timestamp
                 )
-            
-            # 5. Save State (for UI)
-            self.save_state_for_ui(symbol, current_price, signals, final_decision)
-            
-            # 6. Update Ocean Feed (Shared JSON for UI)
-            # We append high-confidence finds to a list
-            if final_decision.confidence > 0.6:
-                self.update_ocean_feed(symbol, final_decision)
 
-        except Exception as e:
-            logger.error(f"Error analyzing {symbol}: {e}")
+        logger.info("🏁 Backtest Complete. Check Dashboard for Results.")
 
-    def update_ocean_feed(self, symbol, decision):
-        """Update the shared JSON file for the UI Ocean Feed."""
-        feed_path = "data/ocean_feed.json"
-        try:
-            feed = []
-            if os.path.exists(feed_path):
-                with open(feed_path, "r") as f:
-                    feed = json.load(f)
-            
-            # Add new entry
-            new_entry = {
-                "Asset": symbol,
-                "Signal": decision.action,
-                "AI Confidence": decision.confidence,
-                "Reasoning": decision.metadata.get("reasoning", "")[:100] + "...",
-                "Timestamp": datetime.now(timezone.utc).isoformat()
-            }
-            
-            # Prepend and keep top 20
-            feed.insert(0, new_entry)
-            feed = feed[:20]
-            
-            with open(feed_path, "w") as f:
-                json.dump(feed, f, indent=4)
-        except Exception as e:
-            logger.error(f"Failed to update ocean feed: {e}")
+    async def run_live_scanner(self):
+        """Mode 2 & 3: Paper/Live Trading on Real Data"""
+        logger.info(f"📡 STARTING {self.mode} SCANNER...")
+        
+        while self.running:
+            try:
+                # 1. Get Active Ocean (Top Volume coins)
+                # Note: We filter for 'perpetual_futures' to ensure liquidity
+                products = delta_client.get_products().get('result', [])
+                opportunities = [p['symbol'] for p in products if p['contract_type'] == 'perpetual_futures'][:10] # Scan Top 10 for speed
+                
+                logger.info(f"🌊 Scanning Ocean: {len(opportunities)} Assets")
 
-    def save_state_for_ui(self, symbol, price, signals, decision):
-        # Save to a specific file per symbol or a master state DB
-        # For simplicity, we overwrite state.json (UI will flicker between symbols, 
-        # ideally UI should support a dropdown)
-        import json
-        state = {
-            "symbol": symbol,
-            "price": price,
-            "decision": {
-                "action": decision.action,
-                "confidence": decision.confidence,
-                "reasoning": decision.metadata.get("reasoning", "")
-            },
-            "signals": [
-                {
-                    "agent": s.agent_name,
-                    "action": s.action,
-                    "confidence": s.confidence,
-                    "metadata": s.metadata
-                } for s in signals
-            ],
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-        try:
-            with open("data/state.json", "w") as f:
-                json.dump(state, f, indent=4)
-        except Exception as e:
-            logger.error(f"Failed to save state: {e}")
+                for symbol in opportunities:
+                    # Fetch Live Data
+                    history = delta_client.get_history(symbol, "1h", limit=50)
+                    if not history or 'result' not in history: continue
+                    
+                    df = pd.DataFrame(history['result'])
+                    cols = ['open', 'high', 'low', 'close', 'volume']
+                    for c in cols: df[c] = pd.to_numeric(df[c])
+                    
+                    current_price = float(df['close'].iloc[-1])
+
+                    # Analyze
+                    agent_tasks = [agent.analyze(symbol, df) for agent in self.agents]
+                    signals = await asyncio.gather(*agent_tasks)
+                    
+                    decision = await self.main_brain.analyze(symbol, signals)
+
+                    # Execute
+                    if decision.confidence > 0.8 and decision.action in ["BUY", "SELL"]:
+                        logger.info(f"🚀 OPPORTUNITY: {symbol} {decision.action}")
+                        await executor.execute_order(
+                            symbol=symbol,
+                            action=decision.action,
+                            confidence=decision.confidence,
+                            current_price=current_price,
+                            atr=current_price * 0.02,
+                            mode=self.mode
+                        )
+                    
+                    # Rate Limit Protection
+                    await asyncio.sleep(1) 
+
+                # Run The Judge (Self-Improvement)
+                await self.judge.review_performance()
+                
+            except Exception as e:
+                logger.error(f"Scanner Loop Error: {e}")
+                await asyncio.sleep(5)
 
     async def start(self):
         self.running = True
-        logger.info("🚢 Jarvis Ocean Scanner Started.")
-        
-        # Connect DB
         await db_manager.connect()
-
-        while self.running:
-            # 1. Get List of All Symbols
-            ocean_symbols = await self.get_active_ocean()
-            
-            # 2. Process in Batches (Parallel)
-            # We use chunks to avoid hitting API rate limits
-            chunk_size = 5
-            for i in range(0, len(ocean_symbols), chunk_size):
-                batch = ocean_symbols[i:i + chunk_size]
-                logger.info(f"Processing batch: {batch}")
-                
-                tasks = [self.analyze_symbol(sym) for sym in batch]
-                await asyncio.gather(*tasks)
-                
-                await asyncio.sleep(1) # Rate limit breathing room
-
-            # 3. Run The Judge (Self-Learning)
-            await self.judge.review_performance()
-            
-            logger.info("💤 Ocean Scan Complete. Sleeping 5 minutes...")
-            await asyncio.sleep(300)
+        
+        if self.mode == "BACKTEST":
+            await self.run_backtest()
+        else:
+            await self.run_live_scanner()
 
 if __name__ == "__main__":
-    scanner = JarvisScanner()
-    asyncio.run(scanner.start())
+    # Auto-launch UI
+    import subprocess
+    try:
+        subprocess.Popen(["streamlit", "run", "src/dashboard/app.py", "--server.port=8501", "--server.headless=true"], 
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        logger.info("📊 Neural Dashboard Launched: http://localhost:8501")
+    except Exception as e:
+        logger.warning(f"Failed to launch UI: {e}")
+
+    engine = JarvisEngine()
+    try:
+        asyncio.run(engine.start())
+    except KeyboardInterrupt:
+        print("🛑 Shutting down...")
