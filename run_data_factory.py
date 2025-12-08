@@ -96,8 +96,11 @@ def main():
     # Step 5: Start ALL background threads
     print("\n🔌 Step 5: Starting All Collectors...")
     
-    # Start Binance WebSocket
+    # Start Binance WebSocket (price/orderbook)
     threading.Thread(target=binance_ws.run, daemon=True).start()
+    
+    # Start Binance Liquidation WebSocket (NEW)
+    threading.Thread(target=binance_ws.run_liquidation_stream, daemon=True).start()
     
     # Start threaded collectors
     delta.start()

@@ -22,6 +22,7 @@ class BinanceWebSocketCollector:
         self.symbol = symbol.lower()
         self.proxy_manager = proxy_manager
         self.ws = None
+        self.ws_liquidation = None  # NEW: Liquidation WebSocket
         self.running = False
         self.lock = threading.Lock()
         
@@ -52,12 +53,19 @@ class BinanceWebSocketCollector:
             "bid_qty_3": 0.0,
             "ask_qty_1": 0.0,
             "ask_qty_2": 0.0,
-            "ask_qty_3": 0.0
+            "ask_qty_3": 0.0,
+            # NEW: Liquidation data
+            "liquidation_long_1h": 0.0,
+            "liquidation_short_1h": 0.0,
+            "liquidation_total_1h": 0.0
         }
         
         # Flow tracking
         self.trade_history = []  # Track last 5 minutes of trades
         self.last_cleanup = time.time()
+        
+        # NEW: Liquidation tracking
+        self.liquidation_history = []  # Track last 1 hour
         
         print(f"✅ BinanceWebSocketCollector initialized for {symbol.upper()}")
     
@@ -132,6 +140,84 @@ class BinanceWebSocketCollector:
         
         # Run forever (blocking call) with proxy support
         self.ws.run_forever(**proxy_kwargs)
+    
+    def run_liquidation_stream(self):
+        """Start Binance Futures liquidation WebSocket (separate connection)"""
+        # Liquidation stream URL (FUTURES, not SPOT)
+        url = "wss://fstream.binance.com/ws/!forceOrder@arr"
+        
+        print(f"🔥 Connecting to Binance Liquidation Stream: {url}")
+        
+        def on_message_liq(ws, message):
+            try:
+                data = json.loads(message)
+                
+                if 'o' in data:  # Force order event
+                    order = data['o']
+                    side = order.get('S', '').upper()  # SELL = long liquidation, BUY = short liquidation
+                    quantity_usd = float(order.get('p', 0)) * float(order.get('q', 0))
+                    timestamp = time.time()
+                    
+                    # Track liquidations for last 1 hour
+                    with self.lock:
+                        self.liquidation_history.append({
+                            'time': timestamp,
+                            'side': side,
+                            'usd_value': quantity_usd
+                        })
+                        
+                        # Cleanup old data (> 1 hour)
+                        cutoff = timestamp - 3600
+                        self.liquidation_history = [l for l in self.liquidation_history if l['time'] > cutoff]
+                        
+                        # Calculate 1h totals
+                        long_liq = sum(l['usd_value'] for l in self.liquidation_history if l['side'] == 'SELL')
+                        short_liq = sum(l['usd_value'] for l in self.liquidation_history if l['side'] == 'BUY')
+                        
+                        self.latest_data['liquidation_long_1h'] = long_liq
+                        self.latest_data['liquidation_short_1h'] = short_liq
+                        self.latest_data['liquidation_total_1h'] = long_liq + short_liq
+                        
+            except Exception as e:
+                print(f"❌ Liquidation WebSocket message error: {e}")
+        
+        def on_error_liq(ws, error):
+            print(f"❌ Liquidation WebSocket error: {error}")
+        
+        def on_close_liq(ws, close_status_code, close_msg):
+            print(f"⚠️  Liquidation WebSocket closed: {close_status_code}")
+            if self.running:
+                print("🔄 Reconnecting liquidation stream in 5 seconds...")
+                time.sleep(5)
+                self.run_liquidation_stream()  # Reconnect
+        
+        def on_open_liq(ws):
+            print("✅ Binance Liquidation WebSocket connected")
+        
+        # Create WebSocket connection
+        self.ws_liquidation = websocket.WebSocketApp(
+            url,
+            on_message=on_message_liq,
+            on_error=on_error_liq,
+            on_close=on_close_liq,
+            on_open=on_open_liq
+        )
+        
+        # --- CRITICAL PROXY INJECTION FOR USA ---
+        proxy_kwargs = {}
+        if self.proxy_manager:
+            proxy = self.proxy_manager.get_proxy()
+            if proxy:
+                print(f"🔒 Liquidation stream using Proxy: {proxy['host']}:{proxy['port']}")
+                proxy_kwargs = {
+                    "http_proxy_host": proxy['host'],
+                    "http_proxy_port": int(proxy['port']),
+                    "http_proxy_auth": (proxy['username'], proxy['password']),
+                    "proxy_type": "http"
+                }
+        
+        # Run forever (blocking call)
+        self.ws_liquidation.run_forever(**proxy_kwargs)
     
     def _handle_trade(self, data: Dict):
         """Handle aggregate trade data"""
