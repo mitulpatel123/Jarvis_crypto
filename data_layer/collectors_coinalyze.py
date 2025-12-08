@@ -30,9 +30,8 @@ class CoinalyzeCollector(threading.Thread):
         self.base_url = "https://api.coinalyze.net/v1"
         
         self.latest_data = {
-            "liquidation_long_1h": 0.0,
-            "liquidation_short_1h": 0.0,
-            "liquidation_total_1h": 0.0,
+            # REMOVED: liquidation fields (now using Binance WebSocket instead)
+            # Coinalyze liquidations disabled to avoid overwriting Binance real-time data
             "put_call_ratio": 0.0
         }
     
@@ -92,11 +91,10 @@ class CoinalyzeCollector(threading.Thread):
                         short_liq += quantity_usd
                 
                 with self.lock:
-                    self.latest_data["liquidation_long_1h"] = long_liq
-                    self.latest_data["liquidation_short_1h"] = short_liq
-                    self.latest_data["liquidation_total_1h"] = long_liq + short_liq
+                    # DISABLED: Not updating liquidation fields (using Binance WebSocket instead)
+                    pass
                 
-                print(f"✅ Coinalyze: Liquidations = ${long_liq + short_liq:,.0f} (L:${long_liq:,.0f}, S:${short_liq:,.0f})")
+                print(f"✅ Coinalyze: Liquidations DISABLED (using Binance WS) - API returned ${long_liq + short_liq:,.0f}")
                 return True
             else:
                 print(f"⚠️  Coinalyze Liq: HTTP {response.status_code}")
