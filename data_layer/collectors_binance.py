@@ -161,8 +161,6 @@ class BinanceWebSocketCollector:
                     quantity_usd = price * quantity
                     timestamp = time.time()
                     
-                    print(f"🔥 Liquidation: {side} ${quantity_usd:,.0f} ({order.get('s')})")
-                    
                     # Track liquidations for last 1 hour
                     with self.lock:
                         self.liquidation_history.append({
