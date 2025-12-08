@@ -160,9 +160,11 @@ class DeltaExchangeCollector(ThreadedCollector):
 
 class CryptoPanicCollector(ThreadedCollector):
     """
-    CryptoPanic API (Developer v2 - 2025)
+    CryptoPanic API (Developer v2 - 2025) - AI-OPTIMIZED
     https://cryptopanic.com/developers/api/
     Rate limit: 100 requests/month, 2 req/sec
+    
+    ENHANCED: Captures HEADLINES for LLM/AI processing (not just numbers)
     """
     
     def __init__(self, key_manager):
@@ -171,9 +173,11 @@ class CryptoPanicCollector(ThreadedCollector):
         self.base_url = "https://cryptopanic.com/api/developer/v2"
         self.latest_data = {
             "news_sentiment": 0.0,
-            "news_count": 0
+            "news_count": 0,
+            "top_headline": "No news yet",  # NEW: For AI/LLM
+            "headline_list": []  # NEW: Top 5 headlines for context
         }
-        print("✅ CryptoPanicCollector (Threaded) initialized")
+        print("✅ CryptoPanicCollector (AI-Ready) initialized")
     
     def run(self):
         self.running = True
@@ -204,6 +208,7 @@ class CryptoPanicCollector(ThreadedCollector):
                 results = data.get('results', [])
                 
                 if results:
+                    # Calculate numeric sentiment (for XGBoost/traditional ML)
                     scores = []
                     for item in results[:20]:
                         votes = item.get('votes', {})
@@ -212,11 +217,18 @@ class CryptoPanicCollector(ThreadedCollector):
                         if pos + neg > 0:
                             scores.append((pos - neg) / (pos + neg))
                     
+                    # Extract headlines for AI/LLM processing
+                    top_headline = results[0].get('title', 'No Title')
+                    headline_list = [item.get('title', '') for item in results[:5]]  # Top 5
+                    
                     with self.lock:
                         if scores:
                             self.latest_data["news_sentiment"] = sum(scores) / len(scores)
-                            self.latest_data["news_count"] = len(results)
-                            print(f"✅ CryptoPanic: Updated sentiment={self.latest_data['news_sentiment']:.3f}, articles={len(results)}")
+                        self.latest_data["news_count"] = len(results)
+                        self.latest_data["top_headline"] = top_headline  # AI will read this
+                        self.latest_data["headline_list"] = headline_list  # Full context
+                        
+                        print(f"✅ CryptoPanic: Headline='{top_headline[:40]}...', Sentiment={self.latest_data['news_sentiment']:.3f}")
             else:
                 print(f"⚠️  CryptoPanic: HTTP {response.status_code}")
         except requests.exceptions.RequestException as e:

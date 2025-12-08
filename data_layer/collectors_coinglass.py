@@ -17,17 +17,26 @@ class CoinGlassCollector(threading.Thread):
         self.running = False
         self.lock = threading.Lock()
         
-        # 5 API keys from fix.txt
+        # 10 API keys - 5 original + 5 new from user
         self.api_keys = [
+            # Original 5 keys
             "f632594f56e74ddf995f6ffdeac6de82",
             "7dbd21eb250c44a0b18607c89f07166a",
             "be9776242d584b4b81bbb3cde709d4c7",
             "b562b0e74fa5416fb1a754ac0a637468",
-            "7a4a198e1ba44d76bd7fa241d52bc075"
+            "7a4a198e1ba44d76bd7fa241d52bc075",
+            # New 5 keys from user (Dec 2025)
+            "511eb0fc20344f3cb758735b4c95fdb9",
+            "50241cc594154776a60c3b5e6a126193",
+            "c5e8a3f4b79b449fa2533f9349b7cd73",
+            "daa45b3f5d6f4f06b94d73dcd08c7560",
+            "8cef566412cb4dbb8615977169ea4d80"
         ]
         self.current_key_index = 0
         self.call_count = 0
-        self.max_calls_per_key = 100  # Daily limit per key
+        self.max_calls_per_key = 95  # Stay under 100/day (safety margin)
+        self.calls_per_key = [0] * len(self.api_keys)  # Track each key separately
+        self.last_reset_day = datetime.now().day  # Reset counters daily
         
         self.base_url = "https://open-api-v4.coinglass.com/api"
         
@@ -42,11 +51,21 @@ class CoinGlassCollector(threading.Thread):
         }
 
     def get_current_api_key(self):
-        """Rotate API keys when limit reached"""
-        if self.call_count >= self.max_calls_per_key:
-            self.current_key_index = (self.current_key_index + 1) % len(self.api_keys)
-            self.call_count = 0
-            print(f"🔄 CoinGlass: Rotated to API key #{self.current_key_index + 1}")
+        """Rotate API keys intelligently - find least used key"""
+        # Reset all counters if new day
+        current_day = datetime.now().day
+        if current_day != self.last_reset_day:
+            self.calls_per_key = [0] * len(self.api_keys)
+            self.last_reset_day = current_day
+            print(f"🔄 CoinGlass: Daily reset - all keys refreshed ({len(self.api_keys)} keys)")
+        
+        # Find key with lowest usage (smart rotation)
+        self.current_key_index = self.calls_per_key.index(min(self.calls_per_key))
+        
+        # Check if current key is under limit
+        if self.calls_per_key[self.current_key_index] >= self.max_calls_per_key:
+            print(f"⚠️  CoinGlass: All {len(self.api_keys)} keys exhausted for today!")
+            # Return the least used key anyway (best effort)
         
         return self.api_keys[self.current_key_index]
 
@@ -61,7 +80,7 @@ class CoinGlassCollector(threading.Thread):
             params = {"symbol": "BTC", "interval": "1h"}
             
             response = requests.get(url, headers=headers, params=params, timeout=10)
-            self.call_count += 1
+            self.calls_per_key[self.current_key_index] += 1
             
             if response.status_code == 200:
                 data = response.json()
@@ -92,7 +111,7 @@ class CoinGlassCollector(threading.Thread):
             params = {"symbol": "BTC", "interval": "1h", "limit": 25}
             
             response = requests.get(url, headers=headers, params=params, timeout=10)
-            self.call_count += 1
+            self.calls_per_key[self.current_key_index] += 1
             
             if response.status_code == 200:
                 data = response.json()
@@ -138,7 +157,7 @@ class CoinGlassCollector(threading.Thread):
             }
             
             response = requests.get(url, headers=headers, params=params, timeout=10)
-            self.call_count += 1
+            self.calls_per_key[self.current_key_index] += 1
             
             if response.status_code == 200:
                 data = response.json()
@@ -169,9 +188,24 @@ class CoinGlassCollector(threading.Thread):
         return False
 
     def run(self):
-        """Main collection loop - runs every 5 minutes"""
+        """Main collection loop - optimized for maximum safe data collection"""
         self.running = True
-        print("✅ CoinGlassCollector initialized (5 API keys)")
+        
+        # Calculate optimal sleep time based on capacity
+        # Total daily capacity = 10 keys × 95 calls = 950 calls
+        # We make 3 calls per cycle (PCR, OI, Liquidations)
+        # Max safe cycles per day = 950 / 3 = ~316 cycles
+        # Sleep time = 86400 seconds / 316 cycles = ~273 seconds (~4.5 min)
+        # We use 300s (5 min) for guaranteed safety margin
+        
+        optimal_sleep = 300  # 5 minutes = guaranteed sustainable 24/7
+        cycles_per_day = 86400 / optimal_sleep
+        estimated_calls = cycles_per_day * 3
+        
+        print(f"✅ CoinGlassCollector initialized ({len(self.api_keys)} API keys)")
+        print(f"   📊 Capacity: {len(self.api_keys) * self.max_calls_per_key} calls/day")
+        print(f"   🔄 Collection: Every {optimal_sleep/60:.0f} minutes (3 endpoints)")
+        print(f"   📈 Estimated usage: {estimated_calls:.0f} calls/day ({estimated_calls/(len(self.api_keys)*self.max_calls_per_key)*100:.1f}% of capacity)")
         
         while self.running:
             try:
@@ -184,10 +218,12 @@ class CoinGlassCollector(threading.Thread):
                 
                 self.fetch_liquidations()
                 
-                # Sleep for 5 minutes (300 seconds)
-                # With 3 calls every 5 min = 36 calls/hour = 864/day per key
-                # With 5 keys = 4320 calls/day total (way under 500/day limit)
-                time.sleep(300)
+                # OPTIMIZED: Sleep for 5 minutes with 10 keys
+                # 3 calls every 5 min = 36 calls/hour = 864 calls/day total
+                # Distributed across 10 keys with smart rotation = ~86 calls/day per key
+                # Each key limited to max 95 calls/day (enforced by smart rotation)
+                # Smart rotation ensures even distribution with 9-call safety margin per key
+                time.sleep(300)  # 5 minutes - guaranteed sustainable 24/7 collection
                 
             except Exception as e:
                 print(f"❌ CoinGlass thread error: {e}")

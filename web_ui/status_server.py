@@ -27,7 +27,8 @@ API_STATUS = {
     "services": {},
     "database": {"status": "unknown", "rows": 0, "coverage": 0},
     "collectors": {},
-    "field_stats": {}  # NEW: Per-field population stats
+    "field_stats": {},  # Per-field population stats
+    "live_data": {}  # NEW: Live collector snapshots (includes headlines)
 }
 
 
@@ -190,6 +191,31 @@ HTML_TEMPLATE = """
                 {% endfor %}
             </div>
         </div>
+        
+        {% if live_data.get('top_headline') %}
+        <div class="service">
+            <h2>📰 Latest News Headlines (CryptoPanic AI)</h2>
+            <div style="background: #21262d; padding: 15px; border-radius: 6px; border-left: 4px solid #58a6ff;">
+                <div style="font-size: 1.1em; margin-bottom: 10px;"><strong>🔥 Top Headline:</strong></div>
+                <div style="color: #e3b341; font-size: 1.15em; margin-bottom: 15px;">{{ live_data.top_headline }}</div>
+                
+                <div style="font-size: 0.95em; color: #8b949e; margin-top: 15px;"><strong>Recent Headlines:</strong></div>
+                <ul style="margin-top: 10px; padding-left: 20px;">
+                {% for headline in live_data.get('headline_list', [])[:5] %}
+                    <li style="margin: 5px 0; color: #c9d1d9;">{{ headline }}</li>
+                {% endfor %}
+                </ul>
+                
+                <div style="margin-top: 15px; color: #6e7681; font-size: 0.85em;">
+                    <strong>Sentiment Score:</strong> 
+                    <span style="color: {% if live_data.get('news_sentiment', 0) > 0.5 %}#2ea043{% elif live_data.get('news_sentiment', 0) > 0 %}#e3b341{% else %}#da3633{% endif %}">
+                        {{ "%.3f"|format(live_data.get('news_sentiment', 0)) }}
+                    </span>
+                    | <strong>News Count:</strong> {{ live_data.get('news_count', 0) }}
+                </div>
+            </div>
+        </div>
+        {% endif %}
     </div>
 </body>
 </html>
@@ -212,6 +238,7 @@ def dashboard():
         services=API_STATUS['services'],
         collectors=API_STATUS['collectors'],
         field_stats=API_STATUS.get('field_stats', {}),
+        live_data=API_STATUS.get('live_data', {}),  # NEW: Live headlines
         total_api_keys=total_api_keys,
         active_collectors=active_collectors
     )
@@ -257,8 +284,8 @@ def api_field_errors(field_name):
     return jsonify(errors)
 
 
-def update_status(key_manager, db, collectors_status):
-    """Update global status with field-level coverage stats"""
+def update_status(key_manager, db, collectors_status, live_collectors=None):
+    """Update global status with field-level coverage stats and live data"""
     global API_STATUS
     
     # Get key manager status
@@ -332,6 +359,19 @@ def update_status(key_manager, db, collectors_status):
             print(f"⚠️  Status update error: {e}")
             db_status = "error"
     
+    # Extract live data from collectors (headlines, etc.)
+    live_data = {}
+    if live_collectors:
+        # Get CryptoPanic headlines if available
+        if 'cryptopanic' in live_collectors:
+            cp_data = live_collectors['cryptopanic'].get_snapshot()
+            live_data.update({
+                'top_headline': cp_data.get('top_headline', 'No news yet'),
+                'headline_list': cp_data.get('headline_list', []),
+                'news_sentiment': cp_data.get('news_sentiment', 0),
+                'news_count': cp_data.get('news_count', 0)
+            })
+    
     API_STATUS = {
         "last_updated": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
         "services": km_status,
@@ -341,7 +381,8 @@ def update_status(key_manager, db, collectors_status):
             "coverage": coverage_pct
         },
         "collectors": collectors_status,
-        "field_stats": field_stats
+        "field_stats": field_stats,
+        "live_data": live_data
     }
 
 

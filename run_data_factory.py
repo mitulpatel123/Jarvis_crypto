@@ -234,7 +234,12 @@ def main():
             
             # Update web UI status (every 5 seconds)
             if iteration % 5 == 0:
-                update_status(key_manager, db, collectors_status)
+                live_collectors = {
+                    'cryptopanic': cryptopanic,
+                    'coinglass': coinglass,
+                    'coinalyze': coinalyze
+                }
+                update_status(key_manager, db, collectors_status, live_collectors)
             
             # Sleep for 1 second (1Hz collection frequency)
             time.sleep(1)
