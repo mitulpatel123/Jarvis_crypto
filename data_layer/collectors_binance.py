@@ -152,10 +152,13 @@ class BinanceWebSocketCollector:
             try:
                 data = json.loads(message)
                 
-                if 'o' in data:  # Force order event
+                # Binance format: {"e":"forceOrder", "o":{...}}
+                if data.get('e') == 'forceOrder' and 'o' in data:
                     order = data['o']
                     side = order.get('S', '').upper()  # SELL = long liquidation, BUY = short liquidation
-                    quantity_usd = float(order.get('p', 0)) * float(order.get('q', 0))
+                    price = float(order.get('ap', 0))  # Average price (actual liquidation price)
+                    quantity = float(order.get('q', 0))
+                    quantity_usd = price * quantity
                     timestamp = time.time()
                     
                     # Track liquidations for last 1 hour
