@@ -236,6 +236,11 @@ class TimescaleDB:
             sanitized_row = {k: sanitize_value(v) for k, v in row.items()}
             sanitized_rows.append(sanitized_row)
         
+        # DEBUG: Log liquidation values before insert
+        if sanitized_rows:
+            liq = sanitized_rows[0].get('liquidation_total_1h', 'MISSING')
+            print(f"💾 DB Insert liquidation_total_1h: {liq}")
+        
         conn = self.get_conn()
         try:
             cur = conn.cursor()
