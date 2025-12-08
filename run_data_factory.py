@@ -165,7 +165,13 @@ def main():
             }
             
             # Get real-time data (non-blocking snapshots) - these should NOT overwrite time features
-            row.update(binance_ws.get_snapshot())
+            binance_snapshot = binance_ws.get_snapshot()
+            row.update(binance_snapshot)
+            
+            # DEBUG: Log liquidation values every 10 seconds
+            if iteration % 10 == 0:
+                liq_total = binance_snapshot.get('liquidation_total_1h', 0)
+                print(f"📊 Snapshot liq_total_1h: ${liq_total:,.0f}")
             row.update(delta.get_snapshot())
             row.update(cryptopanic.get_snapshot())
             row.update(alphavantage.get_snapshot())
