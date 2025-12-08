@@ -208,21 +208,12 @@ class BinanceWebSocketCollector:
             on_open=on_open_liq
         )
         
-        # --- CRITICAL PROXY INJECTION FOR USA ---
-        proxy_kwargs = {}
-        if self.proxy_manager:
-            proxy = self.proxy_manager.get_proxy()
-            if proxy:
-                print(f"🔒 Liquidation stream using Proxy: {proxy['host']}:{proxy['port']}")
-                proxy_kwargs = {
-                    "http_proxy_host": proxy['host'],
-                    "http_proxy_port": int(proxy['port']),
-                    "http_proxy_auth": (proxy['username'], proxy['password']),
-                    "proxy_type": "http"
-                }
+        # --- NO PROXY for liquidation stream (proxy blocks data) ---
+        # Direct connection works, proxy silently drops WebSocket messages
+        print("⚡ Liquidation stream: Direct connection (no proxy)")
         
-        # Run forever (blocking call)
-        self.ws_liquidation.run_forever(**proxy_kwargs)
+        # Run forever (blocking call) - NO PROXY
+        self.ws_liquidation.run_forever()
     
     def _handle_trade(self, data: Dict):
         """Handle aggregate trade data"""
