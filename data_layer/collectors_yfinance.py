@@ -11,6 +11,7 @@ from typing import Dict, Any
 try:
     import yfinance as yf
     import pandas as pd
+    import numpy as np
     # Suppress yfinance warnings
     logging.getLogger('yfinance').setLevel(logging.CRITICAL)
     YFINANCE_AVAILABLE = True
@@ -63,54 +64,53 @@ class YahooFinanceCollector(threading.Thread):
             return
             
         try:
-            # Download 1-minute data for the last 2 hours
             # Symbols: ^GSPC (S&P 500), DX-Y.NYB (US Dollar Index), BTC-USD
-            tickers_list = ["^GSPC", "DX-Y.NYB", "BTC-USD"]
-            
-            # Download with error handling
-            data = yf.download(
-                tickers=tickers_list,
-                period="1d",
-                interval="1m",
-                progress=False
-            )
-            
-            if data.empty:
-                print("⚠️  YahooFinance: No data downloaded")
-                return
-            
-            # Extract Close prices
-            if 'Close' in data.columns:
-                close_prices = data['Close']
+            tickers = ['BTC-USD', '^GSPC', 'DX-Y.NYB']
+            data_frames = []
+
+            for ticker in tickers:
+                try:
+                    data = yf.Ticker(ticker)
+                    hist = data.history(period="30d", interval="1d")  # Use daily data for better correlation
+                    if not hist.empty:
+                        # Create a DataFrame with just the Close price and datetime index
+                        df = hist[['Close']].rename(columns={'Close': ticker})
+                        data_frames.append(df)
+                except Exception as e:
+                    print(f"⚠️  YahooFinance: Error fetching {ticker} - {e}")
+
+            # Combine data using outer join
+            if data_frames:
+                combined_df = data_frames[0]
+                for df in data_frames[1:]:
+                    combined_df = combined_df.join(df, how='outer')
                 
-                # Handle multi-level columns (when downloading multiple tickers)
-                if isinstance(close_prices.columns, pd.MultiIndex):
-                    close_prices.columns = close_prices.columns.get_level_values(0)
+                # Forward fill and backward fill to handle timezone differences
+                combined_df = combined_df.fillna(method='ffill').fillna(method='bfill')
                 
-                # Drop NaN values
-                close_prices = close_prices.dropna()
+                # Drop any remaining NaN values
+                combined_df = combined_df.dropna()
                 
-                if len(close_prices) < 10:
-                    print("⚠️  YahooFinance: Insufficient data points for correlation")
-                    return
-                
-                # Calculate correlation matrix
-                corr_matrix = close_prices.corr()
-                
-                # Extract correlations with BTC-USD
-                if 'BTC-USD' in corr_matrix.columns:
-                    spx_corr = corr_matrix.loc['BTC-USD', '^GSPC'] if '^GSPC' in corr_matrix.columns else 0.0
-                    dxy_corr = corr_matrix.loc['BTC-USD', 'DX-Y.NYB'] if 'DX-Y.NYB' in corr_matrix.columns else 0.0
+                if len(combined_df) >= 10:
+                    # Calculate correlation matrix
+                    corr_matrix = combined_df.corr()
                     
-                    with self.lock:
-                        self.latest_data["correlation_spx"] = float(spx_corr) if pd.notna(spx_corr) else 0.0
-                        self.latest_data["correlation_dxy"] = float(dxy_corr) if pd.notna(dxy_corr) else 0.0
-                    
-                    print(f"✅ YahooFinance: SPX Corr={spx_corr:.3f}, DXY Corr={dxy_corr:.3f}")
+                    # Extract correlations with BTC-USD
+                    if 'BTC-USD' in corr_matrix.columns:
+                        spx_corr = corr_matrix.loc['BTC-USD', '^GSPC'] if '^GSPC' in corr_matrix.columns else 0.0
+                        dxy_corr = corr_matrix.loc['BTC-USD', 'DX-Y.NYB'] if 'DX-Y.NYB' in corr_matrix.columns else 0.0
+                        
+                        with self.lock:
+                            self.latest_data["correlation_spx"] = float(spx_corr) if pd.notna(spx_corr) else 0.0
+                            self.latest_data["correlation_dxy"] = float(dxy_corr) if pd.notna(dxy_corr) else 0.0
+                        
+                        print(f"✅ YahooFinance: SPX Corr={spx_corr:.3f}, DXY Corr={dxy_corr:.3f}")
+                    else:
+                        print("⚠️  YahooFinance: BTC-USD not in correlation matrix")
                 else:
-                    print("⚠️  YahooFinance: BTC-USD not in correlation matrix")
+                    print("⚠️  YahooFinance: Insufficient data points for correlation")
             else:
-                print("⚠️  YahooFinance: Close prices not available")
+                print("⚠️  YahooFinance: No data downloaded")
                 
         except Exception as e:
             print(f"❌ YahooFinance: Error fetching data - {e}")

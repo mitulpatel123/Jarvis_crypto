@@ -103,12 +103,19 @@ class DeribitCollector(threading.Thread):
                 if result:
                     spot_price = result[0].get('underlying_price', 0)
                 
+                # For gamma strikes - collect instruments with OI
+                instruments_with_oi = []
+                
                 for instrument in result:
                     oi = instrument.get('open_interest', 0)
                     mark_iv = instrument.get('mark_iv', 0)
                     greeks = instrument.get('greeks', {})
                     volume_24h = instrument.get('volume_24h', 0)
                     instrument_name = instrument.get('instrument_name', '')
+                    
+                    # Collect instruments with OI for gamma strike calculation
+                    if oi > 0:
+                        instruments_with_oi.append(instrument)
                     
                     # Determine if Put or Call
                     is_put = '-P-' in instrument_name
@@ -163,6 +170,66 @@ class DeribitCollector(threading.Thread):
                     # Calculate Black-Scholes Greeks if we have spot price
                     bs_greeks = self.calculate_black_scholes_greeks(spot_price, avg_iv_decimal)
                     
+                    # NEW: Calculate gamma strikes from instruments with OI
+                    gamma_strike_1 = 0
+                    gamma_strike_2 = 0
+                    gamma_strike_3 = 0
+                    
+                    if instruments_with_oi:
+                        # Sort by open interest descending
+                        sorted_by_oi = sorted(instruments_with_oi, key=lambda x: x['open_interest'], reverse=True)
+                        
+                        # Get top 3 strike prices
+                        # NOTE: get_book_summary_by_currency doesn't have strike field
+                        # We need to get strike prices from get_instruments endpoint
+                        
+                        # Make a second API call to get instruments with strike prices
+                        instruments_url = f"{self.base_url}/get_instruments"
+                        instruments_params = {
+                            "currency": "BTC",
+                            "kind": "option",
+                            "expired": "false"
+                        }
+                        
+                        try:
+                            instruments_response = requests.get(instruments_url, params=instruments_params, timeout=10)
+                            if instruments_response.status_code == 200:
+                                instruments_data = instruments_response.json()
+                                instruments_result = instruments_data.get('result', [])
+                                
+                                # Create a mapping of instrument_name to strike price
+                                strike_map = {}
+                                for inst in instruments_result:
+                                    name = inst.get('instrument_name')
+                                    strike = inst.get('strike')
+                                    if name and strike:
+                                        strike_map[name] = strike
+                                
+                                # Match instruments with OI to their strike prices
+                                instruments_with_strike = []
+                                for inst in sorted_by_oi:
+                                    name = inst.get('instrument_name')
+                                    oi = inst.get('open_interest', 0)
+                                    if name in strike_map and oi > 0:
+                                        instruments_with_strike.append({
+                                            'instrument_name': name,
+                                            'strike': strike_map[name],
+                                            'open_interest': oi
+                                        })
+                                
+                                # Sort by open interest descending again (now with strike prices)
+                                instruments_with_strike.sort(key=lambda x: x['open_interest'], reverse=True)
+                                
+                                # Get top 3 strike prices
+                                if len(instruments_with_strike) > 0:
+                                    gamma_strike_1 = instruments_with_strike[0].get('strike', 0)
+                                if len(instruments_with_strike) > 1:
+                                    gamma_strike_2 = instruments_with_strike[1].get('strike', 0)
+                                if len(instruments_with_strike) > 2:
+                                    gamma_strike_3 = instruments_with_strike[2].get('strike', 0)
+                        except Exception as e:
+                            print(f"⚠️  Deribit: Error fetching instruments data - {e}")
+                    
                     with self.lock:
                         self.latest_data["implied_volatility"] = avg_iv_display
                         self.latest_data["delta_exposure"] = net_delta
@@ -175,8 +242,12 @@ class DeribitCollector(threading.Thread):
                         self.latest_data["theta_bs"] = bs_greeks["theta"]
                         self.latest_data["put_call_ratio_oi"] = pcr_oi
                         self.latest_data["put_call_ratio_vol"] = pcr_vol
+                        # NEW: Add gamma strikes
+                        self.latest_data["gamma_strike_1"] = gamma_strike_1
+                        self.latest_data["gamma_strike_2"] = gamma_strike_2
+                        self.latest_data["gamma_strike_3"] = gamma_strike_3
                     
-                    print(f"✅ Deribit: IV={avg_iv_display:.2f}%, PCR={pcr_oi:.3f}, Delta(BS)={bs_greeks['delta']:.4f}, Gamma(BS)={bs_greeks['gamma']:.6f}")
+                    print(f"✅ Deribit: IV={avg_iv_display:.2f}%, PCR={pcr_oi:.3f}, Delta(BS)={bs_greeks['delta']:.4f}, Gamma(BS)={bs_greeks['gamma']:.6f}, GammaStrikes=({gamma_strike_1:.0f},{gamma_strike_2:.0f},{gamma_strike_3:.0f})")
                     success = True
                 else:
                     print("⚠️  Deribit: No valid options with open interest")

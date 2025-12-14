@@ -24,7 +24,20 @@ class APIKeyParser:
         }
     
     def parse(self) -> Dict[str, Any]:
-        """Parse the apikey.txt file"""
+        """Parse configuration from .env (preferred) or apikey.txt (legacy)"""
+        # Try loading from .env first
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+            
+            # Check if we have env vars
+            if os.getenv('BINANCE_API_KEY_1') or os.getenv('ETHERSCAN_API_KEY_1'):
+                print("✅ Loading configuration from environment variables (.env)")
+                self._parse_from_env()
+                return self.config
+        except ImportError:
+            print("⚠️  python-dotenv not installed, falling back to file parsing")
+
         if not os.path.exists(self.apikey_file):
             print(f"⚠️  API key file not found: {self.apikey_file}")
             return self.config
@@ -63,6 +76,100 @@ class APIKeyParser:
                 except Exception as e:
                     print(f"⚠️  Error parsing line {line_num} in [{current_section}]: {e}")
         
+        self._print_summary()
+        return self.config
+
+    def _parse_from_env(self):
+        """Parse keys from environment variables"""
+        # Binance
+        i = 1
+        while True:
+            key = os.getenv(f'BINANCE_API_KEY_{i}')
+            secret = os.getenv(f'BINANCE_API_SECRET_{i}')
+            if not key: break
+            self.config['binance_keys'].append({
+                "api_key": key,
+                "api_secret": secret,
+                "limit": 1200,
+                "type": "spot"
+            })
+            i += 1
+            
+        # Delta Exchange
+        i = 1
+        while True:
+            key = os.getenv(f'DELTA_API_KEY_{i}')
+            secret = os.getenv(f'DELTA_API_SECRET_{i}')
+            if not key: break
+            self.config['delta_keys'].append({
+                "api_key": key,
+                "api_secret": secret,
+                "limit": 50
+            })
+            i += 1
+
+        # CryptoPanic
+        i = 1
+        while True:
+            token = os.getenv(f'CRYPTOPANIC_TOKEN_{i}')
+            if not token: break
+            self.config['cryptopanic_keys'].append({
+                "token": token,
+                "monthly_limit": 100,
+                "usage": 0
+            })
+            i += 1
+
+        # Etherscan
+        i = 1
+        while True:
+            key = os.getenv(f'ETHERSCAN_API_KEY_{i}')
+            if not key: break
+            self.config['etherscan_keys'].append({
+                "api_key": key,
+                "daily_limit": 100000,
+                "usage": 0
+            })
+            i += 1
+
+        # Alpha Vantage
+        i = 1
+        while True:
+            key = os.getenv(f'ALPHAVANTAGE_API_KEY_{i}')
+            if not key: break
+            self.config['alphavantage_keys'].append({
+                "api_key": key,
+                "daily_limit": 25,
+                "usage": 0
+            })
+            i += 1
+
+        # FRED
+        i = 1
+        while True:
+            key = os.getenv(f'FRED_API_KEY_{i}')
+            if not key: break
+            self.config['fred_keys'].append({
+                "api_key": key,
+                "limit": 120
+            })
+            i += 1
+
+        # CoinGecko
+        i = 1
+        while True:
+            key = os.getenv(f'COINGECKO_API_KEY_{i}')
+            if not key: break
+            self.config['coingecko_keys'].append({
+                "api_key": key,
+                "monthly_limit": 10000,
+                "usage": 0
+            })
+            i += 1
+            
+        self._print_summary()
+
+    def _print_summary(self):
         print(f"✅ Parsed API keys:")
         print(f"   - Binance: {len(self.config['binance_keys'])} keys")
         print(f"   - Delta Exchange: {len(self.config['delta_keys'])} keys")
@@ -71,8 +178,6 @@ class APIKeyParser:
         print(f"   - Alpha Vantage: {len(self.config['alphavantage_keys'])} keys")
         print(f"   - FRED: {len(self.config['fred_keys'])} keys")
         print(f"   - CoinGecko: {len(self.config['coingecko_keys'])} keys")
-        
-        return self.config
     
     def _parse_binance(self, line: str):
         """Parse: API_KEY:API_SECRET:LIMIT:TYPE"""

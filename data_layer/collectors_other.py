@@ -183,7 +183,7 @@ class CryptoPanicCollector(ThreadedCollector):
         self.running = True
         while self.running:
             self.fetch_news()
-            time.sleep(600)  # Every 10 minutes
+            time.sleep(7200)  # Every 2 hours (100 req/month limit)
     
     def fetch_news(self, currencies: str = "BTC"):
         if not self.key_manager.increment("cryptopanic"):
@@ -307,7 +307,7 @@ class EtherscanCollector(ThreadedCollector):
     def __init__(self, key_manager):
         super().__init__()
         self.key_manager = key_manager
-        self.base_url = "https://api.etherscan.io/api"
+        self.base_url = "https://api.etherscan.io/v2/api"  # Updated to V2 API
         self.latest_data = {
             "whale_inflow": 0.0,
             "whale_outflow": 0.0
@@ -316,17 +316,17 @@ class EtherscanCollector(ThreadedCollector):
             "0x28c6c06298d514db089934071355e5743bf21d60",  # Binance 1
             "0x21a31ee1afc51d94c2efccaa2092ad1028285549"   # Binance 2
         ]
-        self.previous_balances = {}  # Track previous balances
+        self.last_processed_blocks = {}  # Track last processed block for each wallet
         print("✅ EtherscanCollector (Threaded) initialized")
     
     def run(self):
         self.running = True
         while self.running:
-            self.fetch_whale()
+            self.fetch_whale_transactions()
             time.sleep(60)  # Every 60 seconds
     
-    def fetch_whale(self):
-        """Fetch whale wallet balances and calculate inflow/outflow"""
+    def fetch_whale_transactions(self):
+        """Fetch whale wallet transactions and calculate inflow/outflow"""
         if not self.key_manager.increment("etherscan"):
             return
         
@@ -335,16 +335,19 @@ class EtherscanCollector(ThreadedCollector):
             if not key:
                 return
             
-            total_balance = 0
-            inflow = 0
-            outflow = 0
+            total_inflow = 0.0
+            total_outflow = 0.0
             
             for wallet in self.wallets:
+                # Get normal transactions
                 params = {
+                    "chainid": "1",  # Ethereum mainnet
                     "module": "account",
-                    "action": "balance",
+                    "action": "txlist",
                     "address": wallet,
-                    "tag": "latest",
+                    "startblock": self.last_processed_blocks.get(wallet, 0),
+                    "endblock": 99999999,
+                    "sort": "asc",
                     "apikey": key["api_key"]
                 }
                 
@@ -352,27 +355,90 @@ class EtherscanCollector(ThreadedCollector):
                 if response.status_code == 200:
                     data = response.json()
                     if data.get('status') == '1':
-                        balance = int(data.get('result', 0)) / 1e18
-                        total_balance += balance
+                        transactions = data.get('result', [])
                         
-                        # Calculate inflow/outflow
-                        if wallet in self.previous_balances:
-                            change = balance - self.previous_balances[wallet]
-                            if change > 0:
-                                inflow += change
-                            else:
-                                outflow += abs(change)
+                        inflow = 0.0
+                        outflow = 0.0
                         
-                        # Update previous balance
-                        self.previous_balances[wallet] = balance
+                        for tx in transactions:
+                            # Check if transaction is successful
+                            if tx.get('isError') == '0':
+                                value_wei = int(tx.get('value', 0))
+                                value_eth = value_wei / 1e18
+                                
+                                # Only count large transactions (> 10 ETH as whale threshold)
+                                if value_eth > 10:
+                                    # Check if this wallet is the receiver (inflow) or sender (outflow)
+                                    if tx.get('to', '').lower() == wallet.lower():
+                                        inflow += value_eth
+                                    elif tx.get('from', '').lower() == wallet.lower():
+                                        outflow += value_eth
+                        
+                        total_inflow += inflow
+                        total_outflow += outflow
+                        
+                        # Update last processed block
+                        if transactions:
+                            last_block = max(int(tx.get('blockNumber', 0)) for tx in transactions)
+                            self.last_processed_blocks[wallet] = last_block
+                
+                time.sleep(0.4)  # Rate limit
+                
+                # Also check ERC-20 token transactions for WBTC
+                token_params = {
+                    "chainid": "1",  # Ethereum mainnet
+                    "module": "account",
+                    "action": "tokentx",
+                    "address": wallet,
+                    "startblock": self.last_processed_blocks.get(f"{wallet}_token", 0),
+                    "endblock": 99999999,
+                    "sort": "asc",
+                    "apikey": key["api_key"]
+                }
+                
+                token_response = requests.get(self.base_url, params=token_params, timeout=10)
+                if token_response.status_code == 200:
+                    token_data = token_response.json()
+                    if token_data.get('status') == '1':
+                        token_transactions = token_data.get('result', [])
+                        
+                        # WBTC contract address
+                        wbtc_contract = "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599"
+                        
+                        inflow = 0.0
+                        outflow = 0.0
+                        
+                        for tx in token_transactions:
+                            # Check if this is a WBTC transaction
+                            if tx.get('contractAddress', '').lower() == wbtc_contract.lower():
+                                # Check if transaction is successful
+                                if tx.get('tokenDecimal'):
+                                    decimals = int(tx.get('tokenDecimal', 18))
+                                    value_tokens = int(tx.get('value', 0)) / (10 ** decimals)
+                                    
+                                    # Only count large transactions (> 1 WBTC as whale threshold)
+                                    if value_tokens > 1:
+                                        # Check if this wallet is the receiver (inflow) or sender (outflow)
+                                        if tx.get('to', '').lower() == wallet.lower():
+                                            inflow += value_tokens
+                                        elif tx.get('from', '').lower() == wallet.lower():
+                                            outflow += value_tokens
+                        
+                        total_inflow += inflow
+                        total_outflow += outflow
+                        
+                        # Update last processed block for token transactions
+                        if token_transactions:
+                            last_block = max(int(tx.get('blockNumber', 0)) for tx in token_transactions)
+                            self.last_processed_blocks[f"{wallet}_token"] = last_block
                 
                 time.sleep(0.4)  # Rate limit
             
             with self.lock:
-                self.latest_data["whale_inflow"] = inflow
-                self.latest_data["whale_outflow"] = outflow
-                if inflow > 0 or outflow > 0:
-                    print(f"✅ Etherscan: Whale inflow={inflow:.2f} ETH, outflow={outflow:.2f} ETH")
+                self.latest_data["whale_inflow"] = total_inflow
+                self.latest_data["whale_outflow"] = total_outflow
+                if total_inflow > 0 or total_outflow > 0:
+                    print(f"✅ Etherscan: Whale inflow={total_inflow:.2f} ETH/WBTC, outflow={total_outflow:.2f} ETH/WBTC")
         except requests.exceptions.RequestException as e:
             print(f"❌ Etherscan: Request failed - {e}")
         except Exception as e:
