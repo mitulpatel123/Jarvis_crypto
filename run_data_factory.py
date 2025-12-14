@@ -69,8 +69,7 @@ def graceful_shutdown(signum, frame):
 
 def main():
     global db, web_server, monitor, collectors
-    
-    print("🚀 Starting Crypto Data Factory...")
+    print("\n🚀 Starting Crypto Data Factory v2.1 (Resilience Update)...")
     start_time = time.time()
     
     # Register shutdown handler

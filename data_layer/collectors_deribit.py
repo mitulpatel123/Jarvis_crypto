@@ -299,12 +299,20 @@ class DeribitCollector(threading.Thread):
             response = requests.get(url, params=params, timeout=5)
             if response.status_code == 200:
                 data = response.json().get('result', {})
-                # DEBUG: Print raw data to see why it's 0
-                print(f"🔍 DEBUG Deribit Backup: {data}")
+                # print(f"🔍 DEBUG Deribit: {data}") # Commented out to reduce noise
                 
                 with self.lock:
-                    # Deribit funding is 8h, similar to Binance
-                    self.latest_data["backup_funding_rate"] = data.get("current_funding", 0)
+                    # Try multiple keys for safety
+                    funding = data.get("current_funding", 0) or data.get("funding_8h", 0)
+                    oi = data.get("open_interest", 0)
+                    
+                    if funding != 0:
+                        self.latest_data["backup_funding_rate"] = funding
+                    if oi != 0:
+                        self.latest_data["backup_open_interest"] = oi
+                    
+                    if funding != 0 or oi != 0:
+                        print(f"✅ Deribit Backup Active: Funding={funding}, OI={oi}")
                     self.latest_data["backup_open_interest"] = data.get("open_interest", 0)
                     
         except Exception:
