@@ -293,7 +293,8 @@ class DeribitCollector(threading.Thread):
         (Funding Rate & Open Interest)
         """
         try:
-            url = f"{self.base_url}/get_ticker"
+            # Corrected Endpoint: public/ticker (REST) vs get_ticker (RPC)
+            url = f"{self.base_url}/ticker"
             params = {"instrument_name": "BTC-PERPETUAL"}
             
             response = requests.get(url, params=params, timeout=5)
