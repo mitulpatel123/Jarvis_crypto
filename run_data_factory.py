@@ -87,7 +87,8 @@ def main():
         # Initialize infrastructure
         db = TimescaleDB()
         key_manager = KeyManager(config)
-        monitor = MonitoringSystem()
+        from infrastructure.monitoring import MONITOR
+        monitor = MONITOR
         
         # Initialize collectors
         binance_ws = BinanceWebSocketCollector(symbol="btcusdt", proxy_manager=key_manager)
