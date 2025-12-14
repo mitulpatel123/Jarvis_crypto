@@ -44,8 +44,10 @@ class CoinGlassCollector(threading.Thread):
             "put_call_ratio": 0.0,
             "oi_change_1h": 0.0,
             "oi_change_4h": 0.0,
-            "oi_change_24h": 0.0
-            # REMOVED: liquidation fields (using Binance WebSocket instead)
+            "oi_change_24h": 0.0,
+            "liquidation_long": 0.0,
+            "liquidation_short": 0.0,
+            "liquidation_all": 0.0
         }
 
     def get_current_api_key(self):
@@ -163,10 +165,12 @@ class CoinGlassCollector(threading.Thread):
                     latest = data["data"][0] if data["data"] else {}
                     
                     with self.lock:
-                        # DISABLED: Not updating liquidation fields (using Binance WebSocket)
-                        pass
+                        # Extract aggregation data
+                        self.latest_data["liquidation_long"] = float(latest.get("buyVol", 0))
+                        self.latest_data["liquidation_short"] = float(latest.get("sellVol", 0))
+                        self.latest_data["liquidation_all"] = float(latest.get("totalVol", 0))
                     
-                    print(f"✅ CoinGlass: Liquidations DISABLED (using Binance WS)")
+                    print(f"✅ CoinGlass: Liquidation Long={self.latest_data['liquidation_long']:.0f}, Short={self.latest_data['liquidation_short']:.0f}")
                     return True
                 else:
                     print(f"⚠️  CoinGlass Liq: API Error - {data.get('msg', 'Unknown')}")

@@ -26,6 +26,7 @@ from data_layer.collectors_binance import (
     BinanceRESTCollector
 )
 from data_layer.collectors_deribit import DeribitCollector
+from data_layer.collectors_coinglass import CoinGlassCollector
 
 from data_layer.collectors_other import (
     CryptoPanicCollector, 
@@ -88,10 +89,11 @@ def main():
         key_manager = KeyManager(config)
         monitor = MonitoringSystem()
         
-        # Initialize collectors - REMOVED DeltaExchangeCollector
+        # Initialize collectors
         binance_ws = BinanceWebSocketCollector(symbol="btcusdt", proxy_manager=key_manager)
         binance_rest = BinanceRESTCollector(symbol="BTCUSDT", key_manager=key_manager)
         deribit = DeribitCollector()
+        coinglass = CoinGlassCollector()  # NEW: Restored CoinGlass
 
         cryptopanic = CryptoPanicCollector(key_manager)
         alternative_me = AlternativeMeCollector()
@@ -101,7 +103,7 @@ def main():
         
         # Store collectors for shutdown
         collectors = [
-            binance_ws, binance_rest, deribit, 
+            binance_ws, binance_rest, deribit, coinglass,
             cryptopanic, alternative_me, etherscan, alpha_vantage, yfinance
         ]
         
@@ -115,6 +117,7 @@ def main():
         
         # Start other collectors
         deribit.start()
+        coinglass.start()
 
         cryptopanic.start()
         alternative_me.start()
@@ -146,6 +149,7 @@ def main():
             binance_data = binance_ws.get_snapshot()
             binance_rest_data = binance_rest.get_snapshot()
             deribit_data = deribit.get_snapshot()
+            coinglass_data = coinglass.get_snapshot()
 
             cryptopanic_data = cryptopanic.get_snapshot()
             alternative_me_data = alternative_me.get_snapshot()
@@ -158,6 +162,7 @@ def main():
                 **binance_data,
                 **binance_rest_data,
                 **deribit_data,
+                **coinglass_data,
                 **cryptopanic_data,
                 **alternative_me_data,
                 **etherscan_data,
