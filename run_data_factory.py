@@ -104,7 +104,7 @@ def main():
         
         # Store collectors for shutdown
         collectors = [
-            binance_ws, binance_rest, deribit, coinglass,
+            binance_ws, binance_rest, deribit,
             cryptopanic, alternative_me, etherscan, alpha_vantage, yfinance
         ]
         
