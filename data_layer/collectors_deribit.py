@@ -43,7 +43,11 @@ class DeribitCollector(threading.Thread):
             "vega_bs": 0.0,
             "theta_bs": 0.0,
             "put_call_ratio_oi": 0.0,
-            "put_call_ratio_vol": 0.0
+            "put_call_ratio_oi": 0.0,
+            "put_call_ratio_vol": 0.0,
+            # NEW: Backup Data for Binance
+            "backup_funding_rate": 0.0,
+            "backup_open_interest": 0.0
         }
         print("✅ DeribitCollector (Public API) initialized")
     
@@ -53,6 +57,7 @@ class DeribitCollector(threading.Thread):
         while self.running:
             try:
                 self.fetch_options_data()
+                self.fetch_perpetual_stats()  # NEW: Fetch perpetual data
             except Exception as e:
                 print(f"❌ Deribit: Unexpected error - {e}")
             time.sleep(10)  # Poll every 10 seconds
@@ -281,6 +286,27 @@ class DeribitCollector(threading.Thread):
                     response_time=time.time() - start_time,
                     http_status=http_status
                 )
+
+    def fetch_perpetual_stats(self):
+        """
+        Fetch BTC-PERPETUAL stats for backup data
+        (Funding Rate & Open Interest)
+        """
+        try:
+            url = f"{self.base_url}/get_ticker"
+            params = {"instrument_name": "BTC-PERPETUAL"}
+            
+            response = requests.get(url, params=params, timeout=5)
+            if response.status_code == 200:
+                data = response.json().get('result', {})
+                
+                with self.lock:
+                    # Deribit funding is 8h, similar to Binance
+                    self.latest_data["backup_funding_rate"] = data.get("current_funding", 0)
+                    self.latest_data["backup_open_interest"] = data.get("open_interest", 0)
+                    
+        except Exception:
+            pass # Silent fail for backup loop
     
     def get_snapshot(self) -> Dict[str, Any]:
         """Get current Greeks snapshot"""

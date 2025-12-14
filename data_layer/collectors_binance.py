@@ -353,13 +353,20 @@ class BinanceWebSocketCollector:
 class BinanceRESTCollector:
     """
     Binance REST API collector for futures data
-    Uses latest 2025 endpoints
+    Uses latest 2025 endpoints with Robust Fallback (Proxy -> Direct)
     """
     
     def __init__(self, symbol: str = "BTCUSDT", key_manager=None):
         self.symbol = symbol.upper()
         self.key_manager = key_manager
         self.base_url_futures = "https://fapi.binance.com"
+        
+        # Headers to look like a real browser
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9"
+        }
         
         self.latest_data = {
             "symbol": symbol.upper(),
@@ -370,113 +377,87 @@ class BinanceRESTCollector:
             "long_short_ratio": None
         }
         
-        # Track previous OI for change calculation
-        self.oi_history = []  # List of (timestamp, oi) tuples
+        self.oi_history = []
+        print(f"✅ BinanceRESTCollector initialized for {symbol} (Robust Mode)")
+
+    def _make_request(self, endpoint: str, params: Dict) -> Optional[Dict]:
+        """
+        Robust request handler:
+        1. Try with Proxy (if available)
+        2. Fallback to Direct Connection (if proxy fails)
+        3. Handle Headers & Errors
+        """
+        url = f"{self.base_url_futures}{endpoint}"
         
-        print(f"✅ BinanceRESTCollector initialized for {symbol}")
-    
-    def fetch_funding_rate(self) -> Optional[float]:
-        """
-        Fetch current and predicted funding rate
-        Endpoint: GET /fapi/v1/fundingRate (public, no auth needed)
-        Endpoint: GET /fapi/v1/premiumIndex (for predicted funding)
-        """
+        # Attempt 1: Via Proxy
+        if self.key_manager:
+            try:
+                proxies = self.key_manager.get_proxy_dict()
+                response = requests.get(url, params=params, headers=self.headers, proxies=proxies, timeout=5)
+                response.raise_for_status()
+                return response.json()
+            except Exception as e:
+                # Log only if verbose, otherwise silent fail to fallback
+                pass
+        
+        # Attempt 2: Direct Connection (Fallback)
         try:
-            # Get current funding rate
-            url = f"{self.base_url_futures}/fapi/v1/fundingRate"
-            params = {"symbol": self.symbol, "limit": 1}
-            
-            # Use proxy if available
-            proxies = self.key_manager.get_proxy_dict() if self.key_manager else None
-            
-            response = requests.get(url, params=params, proxies=proxies, timeout=10)
+            # print(f"⚠️  Binance Proxy failed, trying Direct: {endpoint}")
+            response = requests.get(url, params=params, headers=self.headers, timeout=5)
             response.raise_for_status()
-            
-            data = response.json()
-            if data and len(data) > 0:
-                funding_rate = float(data[0].get('fundingRate', 0))
-                self.latest_data["funding_rate"] = funding_rate
-            
-            # Get predicted funding rate (next funding)
-            url_premium = f"{self.base_url_futures}/fapi/v1/premiumIndex"
-            params_premium = {"symbol": self.symbol}
-            
-            response_premium = requests.get(url_premium, params=params_premium, proxies=proxies, timeout=10)
-            response_premium.raise_for_status()
-            
-            premium_data = response_premium.json()
-            if premium_data:
-                # lastFundingRate is the predicted rate
-                predicted = float(premium_data.get('lastFundingRate', 0))
-                self.latest_data["funding_predicted"] = predicted
-                return funding_rate
-                
+            return response.json()
         except Exception as e:
-            print(f"⚠️  Failed to fetch funding rate: {e}")
-        return None
+            print(f"❌ Binance REST Failed ({endpoint}): {e}")
+            return None
+
+    def fetch_funding_rate(self) -> Optional[float]:
+        """Fetch funding and predicted rate"""
+        # Current Funding
+        data = self._make_request("/fapi/v1/fundingRate", {"symbol": self.symbol, "limit": 1})
+        if data and len(data) > 0:
+            funding = float(data[0].get('fundingRate', 0))
+            self.latest_data["funding_rate"] = funding
+        
+        # Predicted Funding
+        premium_data = self._make_request("/fapi/v1/premiumIndex", {"symbol": self.symbol})
+        if premium_data:
+            self.latest_data["funding_predicted"] = float(premium_data.get('lastFundingRate', 0))
+            
+        return self.latest_data["funding_rate"]
     
     def fetch_open_interest(self) -> Optional[float]:
-        """
-        Fetch open interest and calculate 1h change
-        Endpoint: GET /fapi/v1/openInterest (public, no auth needed)
-        """
-        try:
-            url = f"{self.base_url_futures}/fapi/v1/openInterest"
-            params = {"symbol": self.symbol}
-            
-            proxies = self.key_manager.get_proxy_dict() if self.key_manager else None
-            
-            response = requests.get(url, params=params, proxies=proxies, timeout=10)
-            response.raise_for_status()
-            
-            data = response.json()
+        """Fetch open interest"""
+        data = self._make_request("/fapi/v1/openInterest", {"symbol": self.symbol})
+        
+        if data:
             open_interest = float(data.get('openInterest', 0))
             self.latest_data["open_interest"] = open_interest
             
-            # Track OI history for change calculation
+            # ROI Change Calculation
             now = time.time()
             self.oi_history.append((now, open_interest))
-            
-            # Keep only last 2 hours of data
-            cutoff = now - 7200  # 2 hours
+            cutoff = now - 7200
             self.oi_history = [(t, oi) for t, oi in self.oi_history if t > cutoff]
             
-            # Calculate 1h change
             one_hour_ago = now - 3600
             historical_oi = [oi for t, oi in self.oi_history if t <= one_hour_ago]
             if historical_oi:
-                old_oi = historical_oi[-1]  # Get closest to 1h ago
-                oi_change = ((open_interest - old_oi) / old_oi * 100) if old_oi > 0 else 0
-                self.latest_data["oi_change_1h"] = oi_change
-            
+                old_oi = historical_oi[-1]
+                if old_oi > 0:
+                    self.latest_data["oi_change_1h"] = ((open_interest - old_oi) / old_oi) * 100
+                    
             return open_interest
-                
-        except Exception as e:
-            print(f"⚠️  Failed to fetch open interest: {e}")
         return None
     
     def fetch_long_short_ratio(self) -> Optional[float]:
-        """
-        Fetch top trader long/short ratio
-        Endpoint: GET /futures/data/topLongShortAccountRatio (public)
-        """
-        try:
-            url = f"{self.base_url_futures}/futures/data/topLongShortAccountRatio"
-            params = {"symbol": self.symbol, "period": "5m", "limit": 1}
-            
-            proxies = self.key_manager.get_proxy_dict() if self.key_manager else None
-            
-            response = requests.get(url, params=params, proxies=proxies, timeout=10)
-            response.raise_for_status()
-            
-            data = response.json()
-            if data and len(data) > 0:
-                ratio = float(data[0].get('longShortRatio', 0))
-                self.latest_data["long_short_ratio"] = ratio
-                return ratio
-                
-        except Exception as e:
-            print(f"⚠️  Failed to fetch long/short ratio: {e}")
+        """Fetch top trader LS ratio"""
+        data = self._make_request("/futures/data/topLongShortAccountRatio", 
+                                {"symbol": self.symbol, "period": "5m", "limit": 1})
+        
+        if data and len(data) > 0:
+            ratio = float(data[0].get('longShortRatio', 0))
+            self.latest_data["long_short_ratio"] = ratio
+            return ratio
         return None
     
     def get_snapshot(self) -> Dict[str, Any]:
