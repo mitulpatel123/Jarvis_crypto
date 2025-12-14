@@ -299,6 +299,8 @@ class DeribitCollector(threading.Thread):
             response = requests.get(url, params=params, timeout=5)
             if response.status_code == 200:
                 data = response.json().get('result', {})
+                # DEBUG: Print raw data to see why it's 0
+                print(f"🔍 DEBUG Deribit Backup: {data}")
                 
                 with self.lock:
                     # Deribit funding is 8h, similar to Binance
