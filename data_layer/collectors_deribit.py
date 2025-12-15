@@ -175,6 +175,11 @@ class DeribitCollector(threading.Thread):
         with self.lock:
             return self.latest_data.copy()
 
+    def get_snapshot(self) -> Dict[str, Any]:
+        """Thread-safe data retrieval"""
+        with self.lock:
+            return self.latest_data.copy()
+
     def get_backup_funding_rate(self) -> Optional[float]:
         with self.lock:
             return self.latest_data.get("backup_funding_rate")
