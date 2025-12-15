@@ -1,14 +1,14 @@
 """
 FRED (Federal Reserve Economic Data) API Collector
 Provides: DXY, 10Y Treasury Yields, M2 Money Supply
-FREE unlimited with API key - Using fredapi library for reliability
+Refactored to use DIRECT HTTP requests (Reliable) instead of fredapi
 """
 
 import threading
 import time
-from fredapi import Fred
+import requests
+import os
 from datetime import datetime
-
 
 class FREDCollector(threading.Thread):
     def __init__(self, key_manager):
@@ -17,7 +17,6 @@ class FREDCollector(threading.Thread):
         self.running = False
         self.lock = threading.Lock()
         self.key_manager = key_manager
-        self.fred = None
         
         # FRED series IDs
         self.series_ids = {
@@ -31,93 +30,101 @@ class FREDCollector(threading.Thread):
             "treasury_10y": 0.0,
             "m2_money_supply": 0.0
         }
-        
-    def initialize_fred(self):
-        """Initialize FRED API client with key from manager"""
+        print("✅ FREDCollector (Direct HTTP) initialized")
+    
+    def fetch_series_data(self, series_id, data_key):
+        """Fetch latest data point directly from FRED API"""
         try:
+            # Get next key (rotation)
+            if not self.key_manager.increment("fred"):
+                return False
+                
             key_info = self.key_manager.get_key("fred")
             if not key_info:
                 print("❌ FRED: No API key available")
                 return False
             
             api_key = key_info.get("api_key") or key_info.get("token")
-            self.fred = Fred(api_key=api_key)
-            return True
-        except Exception as e:
-            print(f"❌ FRED: Initialization failed - {e}")
-            return False
-    
-    def fetch_series_data(self, series_id, data_key):
-        """Fetch latest data point for a FRED series using fredapi library"""
-        try:
-            if not self.fred:
-                if not self.initialize_fred():
-                    return False
             
-            # Get latest observation
-            series = self.fred.get_series(series_id, limit=1)
+            url = "https://api.stlouisfed.org/fred/series/observations"
+            params = {
+                "series_id": series_id,
+                "api_key": api_key,
+                "file_type": "json",
+                "limit": 1,
+                "sort_order": "desc"
+            }
             
-            if series is not None and len(series) > 0:
-                latest_value = series.iloc[-1]
+            response = requests.get(url, params=params, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                observations = data.get('observations', [])
                 
-                # Handle NaN values
-                if latest_value != latest_value:  # NaN check
-                    print(f"⚠️  FRED {data_key}: No recent data (NaN)")
+                if observations:
+                    latest = observations[0]
+                    value_str = latest.get('value', '.')
+                    
+                    if value_str == '.':
+                        print(f"⚠️  FRED {data_key}: Data is present but value is missing ('.')")
+                        return False
+                        
+                    value = float(value_str)
+                    
+                    # M2 is in billions, convert to trillions
+                    if data_key == "m2_money_supply":
+                        value = value / 1000
+                    
+                    with self.lock:
+                        self.latest_data[data_key] = value
+                    return True
+                else:
+                    print(f"⚠️  FRED {data_key}: No observations returned")
                     return False
-                
-                value = float(latest_value)
-                
-                # M2 is in billions, others are already in correct format
-                if data_key == "m2_money_supply":
-                    value = value / 1000  # Convert to trillions for readability
-                
-                with self.lock:
-                    self.latest_data[data_key] = value
-                
-                self.key_manager.increment("fred")
-                return True
+            elif response.status_code == 429:
+                 print(f"⚠️  FRED Rate Limit (429) - Rotating key next time")
+                 return False
             else:
-                print(f"⚠️  FRED {data_key}: No data returned")
-                return False
+                 print(f"❌ FRED HTTP {response.status_code}: {response.text}")
+                 return False
                         
         except Exception as e:
-            print(f"❌ FRED {data_key}: {type(e).__name__}: {e}")
+            print(f"❌ FRED {data_key} Error: {e}")
             return False
     
     def run(self):
-        """Main collection loop - runs every 1 hour (data updates daily)"""
+        """Main collection loop - runs every 1 hour"""
         self.running = True
-        print("✅ FREDCollector initialized (Using existing 4 API keys)")
         
         while self.running:
             try:
-                # Fetch all series
-                self.fetch_series_data(self.series_ids["dxy"], "dxy_fred")
-                time.sleep(5)
+                success_count = 0
+                if self.fetch_series_data(self.series_ids["dxy"], "dxy_fred"): success_count += 1
+                time.sleep(2)
                 
-                self.fetch_series_data(self.series_ids["treasury_10y"], "treasury_10y")
-                time.sleep(5)
+                if self.fetch_series_data(self.series_ids["treasury_10y"], "treasury_10y"): success_count += 1
+                time.sleep(2)
                 
-                self.fetch_series_data(self.series_ids["m2_money"], "m2_money_supply")
+                if self.fetch_series_data(self.series_ids["m2_money"], "m2_money_supply"): success_count += 1
                 
                 # Print status
                 dxy = self.latest_data['dxy_fred']
                 treasury = self.latest_data['treasury_10y']
                 m2 = self.latest_data['m2_money_supply']
-                print(f"✅ FRED: DXY={dxy:.2f}, 10Y={treasury:.3f}%, M2=${m2:.2f}T")
                 
-                # Sleep for 1 hour (data updates once per day)
+                if success_count > 0:
+                    print(f"✅ FRED Updated: DXY={dxy:.2f}, 10Y={treasury:.3f}%, M2=${m2:.2f}T")
+                
+                # Sleep for 1 hour
                 time.sleep(3600)
                 
             except Exception as e:
                 print(f"❌ FRED thread error: {e}")
-                time.sleep(300)  # 5 min on error
+                time.sleep(300)
     
     def get_snapshot(self):
-        """Thread-safe data retrieval"""
         with self.lock:
             return self.latest_data.copy()
     
     def stop(self):
-        """Stop the collector"""
         self.running = False

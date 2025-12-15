@@ -1,291 +1,127 @@
 """
-Deribit Data Collector (Public API - No Authentication Required)
-Provides Implied Volatility and Greeks for BTC Options
-Enhanced with Black-Scholes calculation and Put/Call Ratio
-https://docs.deribit.com/
+Deribit Data Collector
+Fetches implied volatility and greeks.
+Refactored to use ATM Options for Greeks as Perpetuals do not have them.
 """
 
 import requests
-import threading
 import time
+import threading
 import math
-from typing import Dict, Any
+import numpy as np
 from scipy.stats import norm
+from typing import Dict, Any, Optional
+from datetime import datetime
 
-# Import monitoring
+# Monitor hooks (optional)
 try:
     from infrastructure.monitoring import MONITOR
-except:
+except ImportError:
     MONITOR = None
 
-
 class DeribitCollector(threading.Thread):
-    """
-    Deribit Public API Collector for Options Greeks
-    Endpoint: /api/v2/public/get_book_summary_by_currency
-    Rate Limit: No authentication needed, reasonable rate limits
-    """
-    
     def __init__(self):
         super().__init__()
         self.daemon = True
         self.running = False
         self.lock = threading.Lock()
+        
         self.base_url = "https://www.deribit.com/api/v2/public"
         self.latest_data = {
             "implied_volatility": 0.0,
+            "iv_rank": 50.0,
             "delta_exposure": 0.0,
+            "gamma_exposure": 0.0, # Not actively used but good to have
             "theta": 0.0,
             "vega": 0.0,
-            "iv_rank": 0.0,
+            "put_call_ratio_vol": 0.0,
+            "put_call_ratio_oi": 0.0,
             "delta_bs": 0.0,
             "gamma_bs": 0.0,
             "vega_bs": 0.0,
             "theta_bs": 0.0,
-            "put_call_ratio_oi": 0.0,
-            "put_call_ratio_oi": 0.0,
-            "put_call_ratio_vol": 0.0,
-            # NEW: Backup Data for Binance
+            # Reserve fields for Gamma Strikes
+            "gamma_strike_1": 0.0,
+            "gamma_strike_2": 0.0,
+            "gamma_strike_3": 0.0,
+            # Backup fields for Binance
             "backup_funding_rate": 0.0,
             "backup_open_interest": 0.0
         }
-        print("✅ DeribitCollector (Public API) initialized")
-    
+        print("✅ DeribitCollector (ATM Greeks) initialized")
+
     def run(self):
-        """Background thread loop - fetches data every 10 seconds"""
+        """Main loop"""
         self.running = True
         while self.running:
-            try:
-                self.fetch_options_data()
-                self.fetch_perpetual_stats()  # NEW: Fetch perpetual data
-            except Exception as e:
-                print(f"❌ Deribit: Unexpected error - {e}")
-            time.sleep(10)  # Poll every 10 seconds
-    
-    def fetch_options_data(self):
-        """Fetch BTC options data and calculate Greeks"""
-        start_time = time.time()
-        success = False
-        error_type = None
-        error_message = None
-        http_status = None
-        
+            self.get_latest_data()
+            time.sleep(10) # 10s interval
+
+    def fetch_atm_option_greeks(self):
+        """
+        Fetch Greeks from the nearest At-The-Money (ATM) Option.
+        Perpetuals don't have Greeks, so we use the ATM option as a proxy for market volatility/risk.
+        """
         try:
-            # Get all BTC options summary
-            url = f"{self.base_url}/get_book_summary_by_currency"
-            params = {
-                "currency": "BTC",
-                "kind": "option"
-            }
+            # 1. Get Index Price
+            idx_resp = requests.get(f"{self.base_url}/get_index_price", params={"index_name": "btc_usd"}, timeout=5)
+            if idx_resp.status_code != 200:
+                print(f"⚠️ Deribit: Failed to get index price {idx_resp.status_code}")
+                return
             
-            response = requests.get(url, params=params, timeout=10)
-            http_status = response.status_code
+            btc_price = idx_resp.json()['result']['index_price']
             
-            if response.status_code == 200:
-                data = response.json()
-                result = data.get('result', [])
+            # 2. Find closest strike (Round to nearest 1000)
+            target_strike = round(btc_price / 1000) * 1000
+            
+            # 3. Get Option Chain Summary
+            book_url = f"{self.base_url}/get_book_summary_by_currency"
+            params = {"currency": "BTC", "kind": "option"}
+            book_resp = requests.get(book_url, params=params, timeout=5)
+            
+            if book_resp.status_code == 200:
+                options = book_resp.json().get('result', [])
                 
-                if not result:
-                    print("⚠️  Deribit: No options data available")
-                    return
+                # Find an active Call option near the target strike
+                # Prefer shorter duration (e.g., next week/month) for reactive Greeks
+                best_opt = None
+                for opt in options:
+                    name = opt['instrument_name']
+                    # Simple heuristic: Look for strike in name AND Call option ("-C")
+                    if str(target_strike) in name and name.endswith('C'):
+                        best_opt = opt
+                        break # Just take the first one (usually nearest expiry)
                 
-                # Calculate market-wide weighted averages
-                total_oi = 0
-                weighted_iv = 0
-                net_delta = 0
-                net_theta = 0
-                net_vega = 0
-                iv_values = []
-                
-                # For Put/Call Ratio
-                total_put_oi = 0
-                total_call_oi = 0
-                total_put_vol = 0
-                total_call_vol = 0
-                
-                # For Black-Scholes calculation
-                spot_price = 0
-                if result:
-                    spot_price = result[0].get('underlying_price', 0)
-                
-                # For gamma strikes - collect instruments with OI
-                instruments_with_oi = []
-                
-                for instrument in result:
-                    oi = instrument.get('open_interest', 0)
-                    mark_iv = instrument.get('mark_iv', 0)
-                    greeks = instrument.get('greeks', {})
-                    volume_24h = instrument.get('volume_24h', 0)
-                    instrument_name = instrument.get('instrument_name', '')
+                if best_opt:
+                    name = best_opt['instrument_name']
                     
-                    # Collect instruments with OI for gamma strike calculation
-                    if oi > 0:
-                        instruments_with_oi.append(instrument)
+                    # 4. Get Ticker for this specific option (contains Greeks)
+                    ticker_url = f"{self.base_url}/ticker"
+                    ticker_resp = requests.get(ticker_url, params={"instrument_name": name}, timeout=5)
                     
-                    # Determine if Put or Call
-                    is_put = '-P-' in instrument_name
-                    is_call = '-C-' in instrument_name
-                    
-                    if is_put:
-                        total_put_oi += oi
-                        total_put_vol += volume_24h
-                    elif is_call:
-                        total_call_oi += oi
-                        total_call_vol += volume_24h
-                    
-                    if oi > 0 and mark_iv > 0:
-                        total_oi += oi
-                        weighted_iv += mark_iv * oi
-                        iv_values.append(mark_iv)
+                    if ticker_resp.status_code == 200:
+                        ticker_data = ticker_resp.json().get('result', {})
+                        greeks = ticker_data.get('greeks', {})
                         
-                        # Accumulate Greeks weighted by open interest
                         if greeks:
-                            delta = greeks.get('delta', 0) or 0
-                            theta = greeks.get('theta', 0) or 0
-                            vega = greeks.get('vega', 0) or 0
+                            # Safely get values, handling None
+                            delta = greeks.get('delta') or 0.0
+                            gamma = greeks.get('gamma') or 0.0
+                            theta = greeks.get('theta') or 0.0
+                            vega = greeks.get('vega') or 0.0
+                            iv = ticker_data.get('mark_iv') or 0.0
+
+                            with self.lock:
+                                self.latest_data["delta_bs"] = float(delta)
+                                self.latest_data["gamma_bs"] = float(gamma)
+                                self.latest_data["theta_bs"] = float(theta)
+                                self.latest_data["vega_bs"] = float(vega)
+                                self.latest_data["implied_volatility"] = float(iv)
                             
-                            net_delta += delta * oi
-                            net_theta += theta * oi
-                            net_vega += vega * oi
-                
-                # Calculate Put/Call Ratios
-                pcr_oi = total_put_oi / total_call_oi if total_call_oi > 0 else 0
-                pcr_vol = total_put_vol / total_call_vol if total_call_vol > 0 else 0
-                
-                # Calculate final values
-                if total_oi > 0:
-                    avg_iv = weighted_iv / total_oi
-                    # FIX: Deribit returns IV as decimal (0.57 = 57%), not percentage
-                    # Convert to decimal format for Black-Scholes (57% → 0.57)
-                    avg_iv_decimal = avg_iv if avg_iv < 5 else avg_iv / 100
-                    avg_iv_display = avg_iv if avg_iv < 5 else avg_iv  # Keep original for display
-                    
-                    # Calculate IV Rank (percentile)
-                    if len(iv_values) > 10:
-                        iv_values.sort()
-                        min_iv = min(iv_values)
-                        max_iv = max(iv_values)
-                        if max_iv > min_iv:
-                            iv_rank = ((avg_iv - min_iv) / (max_iv - min_iv)) * 100
-                        else:
-                            iv_rank = 50.0
-                    else:
-                        iv_rank = 50.0
-                    
-                    # Calculate Black-Scholes Greeks if we have spot price
-                    bs_greeks = self.calculate_black_scholes_greeks(spot_price, avg_iv_decimal)
-                    
-                    # NEW: Calculate gamma strikes from instruments with OI
-                    gamma_strike_1 = 0
-                    gamma_strike_2 = 0
-                    gamma_strike_3 = 0
-                    
-                    if instruments_with_oi:
-                        # Sort by open interest descending
-                        sorted_by_oi = sorted(instruments_with_oi, key=lambda x: x['open_interest'], reverse=True)
-                        
-                        # Get top 3 strike prices
-                        # NOTE: get_book_summary_by_currency doesn't have strike field
-                        # We need to get strike prices from get_instruments endpoint
-                        
-                        # Make a second API call to get instruments with strike prices
-                        instruments_url = f"{self.base_url}/get_instruments"
-                        instruments_params = {
-                            "currency": "BTC",
-                            "kind": "option",
-                            "expired": "false"
-                        }
-                        
-                        try:
-                            instruments_response = requests.get(instruments_url, params=instruments_params, timeout=10)
-                            if instruments_response.status_code == 200:
-                                instruments_data = instruments_response.json()
-                                instruments_result = instruments_data.get('result', [])
-                                
-                                # Create a mapping of instrument_name to strike price
-                                strike_map = {}
-                                for inst in instruments_result:
-                                    name = inst.get('instrument_name')
-                                    strike = inst.get('strike')
-                                    if name and strike:
-                                        strike_map[name] = strike
-                                
-                                # Match instruments with OI to their strike prices
-                                instruments_with_strike = []
-                                for inst in sorted_by_oi:
-                                    name = inst.get('instrument_name')
-                                    oi = inst.get('open_interest', 0)
-                                    if name in strike_map and oi > 0:
-                                        instruments_with_strike.append({
-                                            'instrument_name': name,
-                                            'strike': strike_map[name],
-                                            'open_interest': oi
-                                        })
-                                
-                                # Sort by open interest descending again (now with strike prices)
-                                instruments_with_strike.sort(key=lambda x: x['open_interest'], reverse=True)
-                                
-                                # Get top 3 strike prices
-                                if len(instruments_with_strike) > 0:
-                                    gamma_strike_1 = instruments_with_strike[0].get('strike', 0)
-                                if len(instruments_with_strike) > 1:
-                                    gamma_strike_2 = instruments_with_strike[1].get('strike', 0)
-                                if len(instruments_with_strike) > 2:
-                                    gamma_strike_3 = instruments_with_strike[2].get('strike', 0)
-                        except Exception as e:
-                            print(f"⚠️  Deribit: Error fetching instruments data - {e}")
-                    
-                    with self.lock:
-                        self.latest_data["implied_volatility"] = avg_iv_display
-                        self.latest_data["delta_exposure"] = net_delta
-                        self.latest_data["theta"] = net_theta
-                        self.latest_data["vega"] = net_vega
-                        self.latest_data["iv_rank"] = iv_rank
-                        self.latest_data["delta_bs"] = bs_greeks["delta"]
-                        self.latest_data["gamma_bs"] = bs_greeks["gamma"]
-                        self.latest_data["vega_bs"] = bs_greeks["vega"]
-                        self.latest_data["theta_bs"] = bs_greeks["theta"]
-                        self.latest_data["put_call_ratio_oi"] = pcr_oi
-                        self.latest_data["put_call_ratio_vol"] = pcr_vol
-                        # NEW: Add gamma strikes
-                        self.latest_data["gamma_strike_1"] = gamma_strike_1
-                        self.latest_data["gamma_strike_2"] = gamma_strike_2
-                        self.latest_data["gamma_strike_3"] = gamma_strike_3
-                    
-                    print(f"✅ Deribit: IV={avg_iv_display:.2f}%, PCR={pcr_oi:.3f}, Delta(BS)={bs_greeks['delta']:.4f}, Gamma(BS)={bs_greeks['gamma']:.6f}, GammaStrikes=({gamma_strike_1:.0f},{gamma_strike_2:.0f},{gamma_strike_3:.0f})")
-                    success = True
-                else:
-                    print("⚠️  Deribit: No valid options with open interest")
-                    success = True  # Still successful response
-                    
-            else:
-                print(f"⚠️  Deribit: HTTP {response.status_code}")
-                error_type = f"HTTP {response.status_code}"
-                error_message = f"API returned status {response.status_code}"
-                
-        except requests.exceptions.Timeout:
-            error_type = "Timeout"
-            error_message = "Request timeout"
-            print("❌ Deribit: Request timeout")
-        except requests.exceptions.RequestException as e:
-            error_type = "NetworkError"
-            error_message = str(e)
-            print(f"❌ Deribit: Network error - {e}")
+                            print(f"✅ Deribit Greeks ({name}): IV={iv:.2f}, Delta={delta:.4f}, Vega={vega:.4f}")
+
         except Exception as e:
-            error_type = "ProcessingError"
-            error_message = str(e)
-            print(f"❌ Deribit: Error processing data - {e}")
-        finally:
-            # Record API call in monitoring system
-            if MONITOR:
-                tracker = MONITOR.get_or_create_tracker('Deribit')
-                tracker.record_call(
-                    success=success,
-                    error_type=error_type,
-                    error_message=error_message,
-                    response_time=time.time() - start_time,
-                    http_status=http_status
-                )
+            print(f"⚠️ Deribit Greeks Error: {e}")
 
     def fetch_perpetual_stats(self):
         """
@@ -293,77 +129,59 @@ class DeribitCollector(threading.Thread):
         (Funding Rate & Open Interest)
         """
         try:
-            # Corrected Endpoint: public/ticker (REST) vs get_ticker (RPC)
             url = f"{self.base_url}/ticker"
             params = {"instrument_name": "BTC-PERPETUAL"}
             
             response = requests.get(url, params=params, timeout=5)
             if response.status_code == 200:
                 data = response.json().get('result', {})
-                # print(f"🔍 DEBUG Deribit: {data}") # Commented out to reduce noise
                 
                 with self.lock:
-                    # Try multiple keys for safety
                     funding = data.get("current_funding", 0) or data.get("funding_8h", 0)
                     oi = data.get("open_interest", 0)
                     
                     if funding != 0:
-                        self.latest_data["backup_funding_rate"] = funding
+                        self.latest_data["backup_funding_rate"] = float(funding)
                     if oi != 0:
-                        self.latest_data["backup_open_interest"] = oi
-                    
-                    if funding != 0 or oi != 0:
-                        print(f"✅ Deribit Backup Active: Funding={funding}, OI={oi}")
-                    self.latest_data["backup_open_interest"] = data.get("open_interest", 0)
-                    
-        except Exception:
-            pass # Silent fail for backup loop
-    
-    def get_snapshot(self) -> Dict[str, Any]:
-        """Get current Greeks snapshot"""
+                        self.latest_data["backup_open_interest"] = float(oi)
+
+        except Exception as e:
+            # print(f"❌ Deribit Backup Error: {e}")
+            pass 
+
+    def get_latest_data(self) -> Dict[str, Any]:
+        """Fetch latest data (Perpetual + Greeks)"""
+        start_time = time.time()
+        success = False
+        error_type = None
+        error_message = None
+        
+        try:
+            # 1. Fetch Perpetual Data (Price, OI, Funding)
+            self.fetch_perpetual_stats()
+            
+            # 2. Fetch Option Greeks (ATM Proxy)
+            # We call this every time in this loop (controlled by run() sleep)
+            # or we can check timestamp. Since run() sleeps 10s, calling checks 10s is fine.
+            self.fetch_atm_option_greeks()
+            
+            success = True
+            
+        except Exception as e:
+            error_type = "ProcessingError"
+            error_message = str(e)
+            print(f"❌ Deribit Main Loop Error: {e}")
+        
         with self.lock:
             return self.latest_data.copy()
-    
-    def calculate_black_scholes_greeks(self, spot, iv, strike=None, time_to_expiry=30/365, risk_free_rate=0.05):
-        """
-        Calculate Black-Scholes Greeks
-        If strike not provided, use ATM (spot price)
-        """
-        try:
-            if spot <= 0 or iv <= 0:
-                return {"delta": 0, "gamma": 0, "vega": 0, "theta": 0}
-            
-            K = strike if strike else spot  # ATM strike
-            S = spot
-            T = time_to_expiry
-            r = risk_free_rate
-            sigma = iv
-            
-            # Calculate d1 and d2
-            d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-            d2 = d1 - sigma * math.sqrt(T)
-            
-            # Standard normal PDF and CDF
-            nd1 = norm.cdf(d1)
-            nprime_d1 = norm.pdf(d1)
-            
-            # Greeks for ATM call option
-            delta = nd1
-            gamma = nprime_d1 / (S * sigma * math.sqrt(T))
-            vega = S * nprime_d1 * math.sqrt(T) / 100  # Per 1% change in IV
-            theta = -(S * nprime_d1 * sigma / (2 * math.sqrt(T)) + r * K * math.exp(-r * T) * norm.cdf(d2)) / 365
-            
-            return {
-                "delta": delta,
-                "gamma": gamma,
-                "vega": vega,
-                "theta": theta
-            }
-        except Exception as e:
-            print(f"⚠️  Black-Scholes calculation error: {e}")
-            return {"delta": 0, "gamma": 0, "vega": 0, "theta": 0}
-    
+
+    def get_backup_funding_rate(self) -> Optional[float]:
+        with self.lock:
+            return self.latest_data.get("backup_funding_rate")
+
+    def get_backup_open_interest(self) -> Optional[float]:
+        with self.lock:
+            return self.latest_data.get("backup_open_interest")
+
     def stop(self):
-        """Stop the collector"""
         self.running = False
-        print("✅ DeribitCollector stopped")

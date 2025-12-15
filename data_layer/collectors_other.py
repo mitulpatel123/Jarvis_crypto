@@ -229,6 +229,10 @@ class CryptoPanicCollector(ThreadedCollector):
                         self.latest_data["headline_list"] = headline_list  # Full context
                         
                         print(f"✅ CryptoPanic: Headline='{top_headline[:40]}...', Sentiment={self.latest_data['news_sentiment']:.3f}")
+            elif response.status_code == 429:
+                print(f"⚠️  CryptoPanic Rate Limit (429) - Rotating key...")
+                # self.key_manager.increment("cryptopanic") # Already incr at start, but loop will handle next call
+                return # Exit to loop to try next key
             else:
                 print(f"⚠️  CryptoPanic: HTTP {response.status_code}")
         except requests.exceptions.RequestException as e:

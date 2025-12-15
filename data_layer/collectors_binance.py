@@ -382,32 +382,44 @@ class BinanceRESTCollector:
 
     def _make_request(self, endpoint: str, params: Dict) -> Optional[Dict]:
         """
-        Robust request handler:
-        1. Try with Proxy (if available)
-        2. Fallback to Direct Connection (if proxy fails)
-        3. Handle Headers & Errors
+        Robust request handler with MANDATORY Proxy for specific endpoints
         """
         url = f"{self.base_url_futures}{endpoint}"
         
-        # Attempt 1: Via Proxy
+        # Endpoints that are blocked in US/Restricted regions MUST use proxy
+        requires_proxy = "topLongShortAccountRatio" in endpoint
+        
+        # Attempt 1: Via Proxy (Always try proxy first for consistency)
         if self.key_manager:
             try:
                 proxies = self.key_manager.get_proxy_dict()
-                response = requests.get(url, params=params, headers=self.headers, proxies=proxies, timeout=5)
-                response.raise_for_status()
-                return response.json()
+                if proxies:
+                    response = requests.get(url, params=params, headers=self.headers, proxies=proxies, timeout=10)
+                    response.raise_for_status()
+                    return response.json()
             except Exception as e:
-                # Log only if verbose, otherwise silent fail to fallback
-                pass
+                # If strictly required, fail here. Otherwise continue.
+                if requires_proxy:
+                    print(f"❌ Binance Proxy Failed for Restricted Endpoint ({endpoint}): {e}")
+                    # Try one more time with a different proxy if possible? 
+                    # For now, let it fall through to direct but warn.
         
-        # Attempt 2: Direct Connection (Fallback)
+        # Attempt 2: Direct Connection (Fallback - Will likely fail for LS Ratio)
+        if requires_proxy:
+             print(f"⚠️  Warning: Attempting direct connection for Restricted Endpoint {endpoint} (Expected 451)")
+
         try:
-            # print(f"⚠️  Binance Proxy failed, trying Direct: {endpoint}")
             response = requests.get(url, params=params, headers=self.headers, timeout=5)
             response.raise_for_status()
             return response.json()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 451:
+                print(f"❌ Geo-blocked (451): {endpoint} requires a non-US Proxy.")
+            else:
+                print(f"❌ Binance REST Error {e.response.status_code}: {e}")
+            return None
         except Exception as e:
-            print(f"❌ Binance REST Failed ({endpoint}): {e}")
+            print(f"❌ Binance REST Failed ({endpoint}) - {type(e).__name__}: {e}")
             return None
 
     def fetch_funding_rate(self) -> Optional[float]:
