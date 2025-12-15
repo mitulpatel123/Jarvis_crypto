@@ -249,14 +249,56 @@ class CryptoPanicCollector(ThreadedCollector):
                     continue # Try next key immediately
                 else:
                     print(f"⚠️  CryptoPanic: HTTP {response.status_code}")
-                    return # Other error, don't spam
+                    # Try backup?
+                    break
                     
             except requests.exceptions.RequestException as e:
                 print(f"❌ CryptoPanic: Request failed - {e}")
-                return
+                # Try backup
+                break
             except Exception as e:
                 print(f"❌ CryptoPanic: Error - {e}")
-                return
+                break
+        
+        # If we reach here, all keys failed or network error
+        print("⚠️ CryptoPanic: All API keys failed. Attempting RSS Backup...")
+        self.fetch_rss_backup()
+
+    def fetch_rss_backup(self):
+        """
+        Backup: Scrape public RSS feed if API fails
+        """
+        try:
+            import xml.etree.ElementTree as ET
+            
+            # Use public RSS feed
+            url = "https://cryptopanic.com/news/rss/"
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            
+            response = requests.get(url, headers=headers, timeout=10)
+            if response.status_code == 200:
+                root = ET.fromstring(response.content)
+                items = root.findall('.//item')
+                
+                if items:
+                    top_item = items[0]
+                    title = top_item.find('title').text
+                    
+                    with self.lock:
+                        self.latest_data["news_sentiment"] = 0.0 # RSS has no sentiment metadata
+                        self.latest_data["news_count"] = len(items)
+                        self.latest_data["top_headline"] = title
+                        # Extract top 5 titles
+                        self.latest_data["headline_list"] = [i.find('title').text for i in items[:5]]
+                    
+                    print(f"✅ CryptoPanic (RSS BACKUP): Headline='{title[:40]}...' (No Sentiment Score)")
+                else:
+                    print("⚠️ CryptoPanic RSS: No items found")
+            else:
+                print(f"❌ CryptoPanic RSS Failed: {response.status_code}")
+
+        except Exception as e:
+            print(f"❌ CryptoPanic RSS Error: {e}")
 
 
 class AlphaVantageCollector(ThreadedCollector):
