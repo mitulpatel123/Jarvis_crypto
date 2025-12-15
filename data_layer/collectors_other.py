@@ -319,7 +319,7 @@ class AlphaVantageCollector(ThreadedCollector):
         self.running = True
         while self.running:
             self.fetch_sentiment()
-            time.sleep(1800)  # Every 30 minutes
+            time.sleep(120)  # Every 2 minutes (Safe: 30 keys * 25 reqs = 750/day total capacity)
     
     def fetch_sentiment(self, symbol: str = "BTC"):
         if not self.key_manager.increment("alphavantage"):
@@ -351,8 +351,12 @@ class AlphaVantageCollector(ThreadedCollector):
                     
                     with self.lock:
                         if scores:
-                            self.latest_data["social_hype_index"] = sum(scores) / len(scores)
-                            print(f"✅ AlphaVantage: Updated hype_index={self.latest_data['social_hype_index']:.3f}")
+                            avg_sentiment = sum(scores) / len(scores)
+                            self.latest_data["social_hype_index"] = avg_sentiment
+                            # OVERWRITE the neutral/dead data from CryptoPanic
+                            self.latest_data["news_sentiment"] = avg_sentiment
+                            
+                            print(f"✅ AlphaVantage: Updated Sent={avg_sentiment:.3f} (Mapped to news_sentiment)")
             else:
                 print(f"⚠️  AlphaVantage: HTTP {response.status_code}")
         except requests.exceptions.RequestException as e:
