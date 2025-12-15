@@ -181,9 +181,12 @@ class CryptoPanicCollector(ThreadedCollector):
     
     def run(self):
         self.running = True
+        # Fetch immediately on start so we don't return 0.0 for 2 hours
+        self.fetch_news()
+        
         while self.running:
-            self.fetch_news()
             time.sleep(7200)  # Every 2 hours (100 req/month limit)
+            self.fetch_news()
     
     def fetch_news(self, currencies: str = "BTC"):
         if not self.key_manager.increment("cryptopanic"):
