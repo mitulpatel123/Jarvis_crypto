@@ -111,6 +111,9 @@ def main():
         t_ws = Thread(target=binance_ws.run, daemon=True)
         t_ws.start()
         
+        # Start Binance REST thread (NEW)
+        binance_rest.start()
+        
         # Start Liquidation stream
         t_liq = Thread(target=binance_ws.run_liquidation_stream, daemon=True)
         t_liq.start()

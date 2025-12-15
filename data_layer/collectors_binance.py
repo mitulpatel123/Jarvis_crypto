@@ -350,13 +350,16 @@ class BinanceWebSocketCollector:
             print(f"✅ Binance WebSocket stopped for {self.symbol.upper()}")
 
 
-class BinanceRESTCollector:
+class BinanceRESTCollector(threading.Thread):
     """
     Binance REST API collector for futures data
     Uses latest 2025 endpoints with Robust Fallback (Proxy -> Direct)
     """
     
     def __init__(self, symbol: str = "BTCUSDT", key_manager=None):
+        super().__init__()
+        self.daemon = True
+        self.running = False
         self.symbol = symbol.upper()
         self.key_manager = key_manager
         self.base_url_futures = "https://fapi.binance.com"
@@ -380,6 +383,34 @@ class BinanceRESTCollector:
         self.oi_history = []
         print(f"✅ BinanceRESTCollector initialized for {symbol} (Robust Mode)")
 
+    def run(self):
+        """Main loop for fetching REST data (Low frequency: 60s)"""
+        self.running = True
+        while self.running:
+            try:
+                self.fetch_funding_rate()
+                self.fetch_open_interest()
+                self.fetch_long_short_ratio()
+                
+                # Check if data is healthy
+                if self.latest_data.get('long_short_ratio'):
+                    # print(f"✅ Binance REST Updated: LS Ratio={self.latest_data['long_short_ratio']}")
+                    pass
+                else:
+                    # print("⚠️ Binance REST: No LS Ratio fetched")
+                    pass
+                    
+            except Exception as e:
+                print(f"❌ Binance REST Loop Error: {e}")
+            
+            # Sleep 60s (Rate limits are tight for LS Ratio)
+            for _ in range(60):
+                if not self.running: break
+                time.sleep(1)
+
+    def stop(self):
+        self.running = False
+
     def _make_request(self, endpoint: str, params: Dict) -> Optional[Dict]:
         """
         Robust request handler with MANDATORY Proxy for specific endpoints
@@ -400,13 +431,12 @@ class BinanceRESTCollector:
             except Exception as e:
                 # If strictly required, fail here. Otherwise continue.
                 if requires_proxy:
-                    print(f"❌ Binance Proxy Failed for Restricted Endpoint ({endpoint}): {e}")
-                    # Try one more time with a different proxy if possible? 
-                    # For now, let it fall through to direct but warn.
+                    # print(f"❌ Binance Proxy Failed for Restricted Endpoint ({endpoint}): {e}")
+                    pass
         
         # Attempt 2: Direct Connection (Fallback - Will likely fail for LS Ratio)
         if requires_proxy:
-             print(f"⚠️  Warning: Attempting direct connection for Restricted Endpoint {endpoint} (Expected 451)")
+             pass # expect failure if no proxy
 
         try:
             response = requests.get(url, params=params, headers=self.headers, timeout=5)
@@ -414,12 +444,14 @@ class BinanceRESTCollector:
             return response.json()
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 451:
-                print(f"❌ Geo-blocked (451): {endpoint} requires a non-US Proxy.")
+                # print(f"❌ Geo-blocked (451): {endpoint}")
+                pass
             else:
-                print(f"❌ Binance REST Error {e.response.status_code}: {e}")
+                # print(f"❌ Binance REST Error {e.response.status_code}: {e}")
+                pass
             return None
         except Exception as e:
-            print(f"❌ Binance REST Failed ({endpoint}) - {type(e).__name__}: {e}")
+            # print(f"❌ Binance REST Failed ({endpoint}): {e}")
             return None
 
     def fetch_funding_rate(self) -> Optional[float]:
@@ -469,6 +501,7 @@ class BinanceRESTCollector:
         if data and len(data) > 0:
             ratio = float(data[0].get('longShortRatio', 0))
             self.latest_data["long_short_ratio"] = ratio
+            # print(f"🔥 LS RATIO FOUND: {ratio}")
             return ratio
         return None
     
