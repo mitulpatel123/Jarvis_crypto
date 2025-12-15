@@ -189,59 +189,74 @@ class CryptoPanicCollector(ThreadedCollector):
             self.fetch_news()
     
     def fetch_news(self, currencies: str = "BTC"):
-        if not self.key_manager.increment("cryptopanic"):
-            return
+        # Try all keys in sequence if we hit rate limits
+        max_retries = len(self.key_manager.config.get('cryptopanic_keys', [])) + 1
         
-        try:
-            key = self.key_manager.get_key("cryptopanic")
-            if not key:
+        for _ in range(max_retries):
+            if not self.key_manager.increment("cryptopanic"):
+                print("⚠️ CryptoPanic: All keys exhausted locally.")
                 return
             
-            url = f"{self.base_url}/posts/"
-            params = {
-                "auth_token": key["token"],
-                "currencies": currencies,
-                "kind": "news",
-                "filter": "rising"
-            }
-            
-            response = requests.get(url, params=params, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
-                results = data.get('results', [])
+            try:
+                key = self.key_manager.get_key("cryptopanic")
+                if not key:
+                    return
                 
-                if results:
-                    # Calculate numeric sentiment (for XGBoost/traditional ML)
+                url = f"{self.base_url}/posts/"
+                params = {
+                    "auth_token": key["token"],
+                    "currencies": currencies,
+                    "kind": "news",
+                    "filter": "rising"
+                }
+                
+                response = requests.get(url, params=params, timeout=10)
+                if response.status_code == 200:
+                    data = response.json()
+                    results = data.get('results', [])
+                    
+                    # Process results even if empty list (it's valid data)
                     scores = []
-                    for item in results[:20]:
-                        votes = item.get('votes', {})
-                        pos = votes.get('positive', 0)
-                        neg = votes.get('negative', 0)
-                        if pos + neg > 0:
-                            scores.append((pos - neg) / (pos + neg))
-                    
-                    # Extract headlines for AI/LLM processing
-                    top_headline = results[0].get('title', 'No Title')
-                    headline_list = [item.get('title', '') for item in results[:5]]  # Top 5
-                    
+                    if results:
+                        for item in results[:20]:
+                            votes = item.get('votes', {})
+                            pos = votes.get('positive', 0)
+                            neg = votes.get('negative', 0)
+                            if pos + neg > 0:
+                                scores.append((pos - neg) / (pos + neg))
+                        
+                        top_headline = results[0].get('title', 'No Title')
+                        headline_list = [item.get('title', '') for item in results[:5]]
+                    else:
+                        top_headline = "No rising news"
+                        headline_list = []
+
                     with self.lock:
                         if scores:
                             self.latest_data["news_sentiment"] = sum(scores) / len(scores)
+                        else:
+                            self.latest_data["news_sentiment"] = 0.0 # Neutral
+
                         self.latest_data["news_count"] = len(results)
-                        self.latest_data["top_headline"] = top_headline  # AI will read this
-                        self.latest_data["headline_list"] = headline_list  # Full context
+                        self.latest_data["top_headline"] = top_headline
+                        self.latest_data["headline_list"] = headline_list
                         
                         print(f"✅ CryptoPanic: Headline='{top_headline[:40]}...', Sentiment={self.latest_data['news_sentiment']:.3f}")
-            elif response.status_code == 429:
-                print(f"⚠️  CryptoPanic Rate Limit (429) - Rotating key...")
-                # self.key_manager.increment("cryptopanic") # Already incr at start, but loop will handle next call
-                return # Exit to loop to try next key
-            else:
-                print(f"⚠️  CryptoPanic: HTTP {response.status_code}")
-        except requests.exceptions.RequestException as e:
-            print(f"❌ CryptoPanic: Request failed - {e}")
-        except Exception as e:
-            print(f"❌ CryptoPanic: Error - {e}")
+                    return # Success! Exit loop
+
+                elif response.status_code == 429:
+                    print(f"⚠️  CryptoPanic Rate Limit (429) - Rotating key and retrying immediately...")
+                    continue # Try next key immediately
+                else:
+                    print(f"⚠️  CryptoPanic: HTTP {response.status_code}")
+                    return # Other error, don't spam
+                    
+            except requests.exceptions.RequestException as e:
+                print(f"❌ CryptoPanic: Request failed - {e}")
+                return
+            except Exception as e:
+                print(f"❌ CryptoPanic: Error - {e}")
+                return
 
 
 class AlphaVantageCollector(ThreadedCollector):
