@@ -49,17 +49,17 @@ class FeatureCalculator:
         # 3. Greeks Normalization & Fallbacks
         # If API gives specific Greek, use it. If not, try fallback or default to 0.
         
-        # Delta (prefer Deribit 'delta', fallback to Delta Exchange 'delta_exposure')
-        derived['delta_bs'] = raw_data.get('delta', raw_data.get('delta_exposure', 0.0))
+        # Delta (prefer Deribit 'delta_bs', fallback to 'delta', then 'delta_exposure')
+        derived['delta_bs'] = raw_data.get('delta_bs', raw_data.get('delta', raw_data.get('delta_exposure', 0.0)))
         
         # Gamma
-        derived['gamma_bs'] = raw_data.get('gamma', 0.0)
+        derived['gamma_bs'] = raw_data.get('gamma_bs', raw_data.get('gamma', 0.0))
         
         # Theta
-        derived['theta_bs'] = raw_data.get('theta', 0.0)
+        derived['theta_bs'] = raw_data.get('theta_bs', raw_data.get('theta', 0.0))
         
         # Vega
-        derived['vega_bs'] = raw_data.get('vega', 0.0)
+        derived['vega_bs'] = raw_data.get('vega_bs', raw_data.get('vega', 0.0))
         
         # 4. Derivative Metrics Normalization
         
