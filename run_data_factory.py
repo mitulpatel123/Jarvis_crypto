@@ -34,6 +34,7 @@ from data_layer.collectors_other import (
     EtherscanCollector,
     AlphaVantageCollector
 )
+from data_layer.collectors_fred import FREDCollector
 from data_layer.collectors_yfinance import YahooFinanceCollector
 from data_layer.feature_calculator import FeatureCalculator
 
@@ -99,12 +100,13 @@ def main():
         alternative_me = AlternativeMeCollector()
         etherscan = EtherscanCollector(key_manager)
         alpha_vantage = AlphaVantageCollector(key_manager)
+        fred = FREDCollector(key_manager=key_manager)
         yfinance = YahooFinanceCollector()
         
         # Store collectors for shutdown
         collectors = [
             binance_ws, binance_rest, deribit,
-            cryptopanic, alternative_me, etherscan, alpha_vantage, yfinance
+            cryptopanic, alternative_me, etherscan, alpha_vantage, fred, yfinance
         ]
         
         # Start Binance WebSocket threads
@@ -126,6 +128,7 @@ def main():
         alternative_me.start()
         etherscan.start()
         alpha_vantage.start()
+        fred.start()
         yfinance.start()
         
         # Initialize feature calculator
@@ -158,6 +161,7 @@ def main():
             alternative_me_data = alternative_me.get_snapshot()
             etherscan_data = etherscan.get_snapshot()
             alpha_vantage_data = alpha_vantage.get_snapshot()
+            fred_data = fred.get_snapshot()
             yfinance_data = yfinance.get_snapshot()
             
             # Combine all data
@@ -170,7 +174,7 @@ def main():
                 **alternative_me_data,
                 **etherscan_data,
                 **alpha_vantage_data,
-                **alpha_vantage_data,
+                **fred_data,
                 **yfinance_data
             }
             
